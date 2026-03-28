@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocket-libre"
+version = "0.1.0"
+description = "Liberate your Pocket AI recorder from the cloud. Local-first BLE audio capture and transcription."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Shah Baig", email = "shah@shahcolate.com"},
+]
+keywords = ["bluetooth", "ble", "whisper", "transcription", "pocket", "voice-recorder", "local-first", "privacy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: System :: Hardware",
+]
+
+dependencies = [
+    "bleak>=0.21.0",
+    "click>=8.1.0",
+    "openai-whisper>=20231117",
+    "rich>=13.0.0",
+    "anthropic>=0.30.0",
+]
+
+[project.optional-dependencies]
+diarize = [
+    "pyannote.audio>=3.1.0",
+    "torch>=2.0.0",
+]
+dev = [
+    "ruff>=0.4.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+pocket-libre = "pocket_libre.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/shahcolate/pocket-libre"
+Repository = "https://github.com/shahcolate/pocket-libre"
+Issues = "https://github.com/shahcolate/pocket-libre/issues"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.setuptools.packages.find]
+where = ["src"]
