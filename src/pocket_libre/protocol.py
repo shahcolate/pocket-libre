@@ -40,10 +40,6 @@ CUSTOM1_SERVICE = "e49a3001-f69a-11e8-8eb2-f2801f1b9fd1"
 CUSTOM1_WRITE_CHAR = "e49a3002-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x002b — APP& commands
 CUSTOM1_NOTIFY_CHAR = "e49a3003-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x0030 — MCU& responses
 
-# Aliases for clarity
-CMD_WRITE_CHAR = CUSTOM1_WRITE_CHAR   # Write APP& commands here
-CMD_NOTIFY_CHAR = CUSTOM1_NOTIFY_CHAR  # MCU& responses arrive here
-
 
 # ──────────────────────────────────────────────
 # E49A25F8: Custom service #2 (audio data)
@@ -51,19 +47,24 @@ CMD_NOTIFY_CHAR = CUSTOM1_NOTIFY_CHAR  # MCU& responses arrive here
 # ──────────────────────────────────────────────
 CUSTOM2_SERVICE = "e49a25f8-f69a-11e8-8eb2-f2801f1b9fd1"
 CUSTOM2_WRITE_CHAR = "e49a25e0-f69a-11e8-8eb2-f2801f1b9fd1"
-CUSTOM2_NOTIFY_CHAR = "e49a28e1-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x002d — MP3 audio
-
-# Alias
-AUDIO_NOTIFY_CHAR = CUSTOM2_NOTIFY_CHAR  # MP3 audio data arrives here
+CUSTOM2_NOTIFY_CHAR = "e49a28e1-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x002d
 
 
 # ──────────────────────────────────────────────
-# 001120A0: Audio data service (legacy/secondary)
+# 001120A0: Primary service (confirmed via live testing)
+# Commands go to 001120A3, audio arrives on 001120A1.
 # ──────────────────────────────────────────────
 AUDIO_SERVICE = "001120a0-2233-4455-6677-889912345678"
 AUDIO_WRITE_CHAR = "001120a2-2233-4455-6677-889912345678"
 AUDIO_DATA_CHAR = "001120a1-2233-4455-6677-889912345678"
 AUDIO_META_CHAR = "001120a3-2233-4455-6677-889912345678"
+
+# ──────────────────────────────────────────────
+# Command + audio channel aliases (confirmed on firmware 1.3.3)
+# ──────────────────────────────────────────────
+CMD_WRITE_CHAR = AUDIO_META_CHAR      # Write APP& commands here
+CMD_NOTIFY_CHAR = AUDIO_META_CHAR     # MCU& responses arrive here
+AUDIO_NOTIFY_CHAR = AUDIO_DATA_CHAR   # MP3 audio data arrives here (001120A1)
 
 
 # ──────────────────────────────────────────────
