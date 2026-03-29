@@ -15,7 +15,7 @@ console = Console()
 async def run_sync(
     address: str,
     duration: int = 60,
-    output_dir: str = "~/pocket-recordings",
+    output_dir: str = "~/Pocket Libre",
     whisper_model: str = "base.en",
     summary_style: str = "meeting",
     hf_token: str | None = None,

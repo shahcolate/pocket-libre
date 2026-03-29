@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pocket Libre</title>
+<style>
+:root {
+  --bg: #1a1b26; --bg2: #24283b; --bg3: #2f3347;
+  --fg: #c0caf5; --fg2: #a9b1d6; --dim: #565f89;
+  --accent: #7aa2f7; --green: #9ece6a; --yellow: #e0af68;
+  --red: #f7768e; --cyan: #7dcfff; --border: #3b4261;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
+.header h1 { font-size: 1.3rem; font-weight: 600; }
+.header .subtitle { color: var(--dim); font-size: 0.85rem; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); margin-left: auto; }
+.status-dot.connected { background: var(--green); }
+.status-dot.error { background: var(--red); }
+
+.tabs { display: flex; background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 2rem; }
+.tab { padding: 0.75rem 1.25rem; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; font-size: 0.9rem; transition: all 0.2s; }
+.tab:hover { color: var(--fg); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.content { max-width: 1000px; margin: 0 auto; padding: 2rem; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
+.card h3 { font-size: 1rem; margin-bottom: 1rem; color: var(--accent); }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
+.stat { text-align: center; }
+.stat .value { font-size: 2rem; font-weight: 700; color: var(--accent); }
+.stat .label { font-size: 0.8rem; color: var(--dim); margin-top: 0.25rem; }
+
+.btn { padding: 0.5rem 1rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); color: var(--fg); cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+.btn:hover { background: var(--border); }
+.btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.btn.primary:hover { opacity: 0.9; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-group { display: flex; gap: 0.5rem; margin-top: 1rem; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: left; padding: 0.6rem 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--bg3); }
+tr:hover td { background: var(--bg3); }
+
+.progress-bar { width: 100%; height: 6px; background: var(--bg3); border-radius: 3px; overflow: hidden; margin-top: 0.5rem; }
+.progress-bar .fill { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: 3px; }
+
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; font-size: 0.85rem; color: var(--dim); margin-bottom: 0.3rem; }
+.form-group input, .form-group select { width: 100%; padding: 0.5rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.9rem; }
+.form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+.form-group .hint { font-size: 0.75rem; color: var(--dim); margin-top: 0.2rem; }
+
+.toast { position: fixed; bottom: 2rem; right: 2rem; padding: 0.75rem 1.25rem; border-radius: 8px; font-size: 0.85rem; z-index: 100; animation: slideIn 0.3s; }
+.toast.success { background: var(--green); color: var(--bg); }
+.toast.error { background: var(--red); color: var(--bg); }
+.toast.info { background: var(--accent); color: var(--bg); }
+@keyframes slideIn { from { transform: translateY(20px); opacity: 0; } }
+
+.empty { text-align: center; padding: 3rem; color: var(--dim); }
+
+.recording-detail { background: var(--bg3); border-radius: 6px; padding: 1rem; margin-top: 0.5rem; display: none; }
+.recording-detail.open { display: block; }
+.recording-detail audio { width: 100%; margin: 0.5rem 0; }
+.recording-detail pre { white-space: pre-wrap; font-size: 0.8rem; max-height: 300px; overflow-y: auto; padding: 0.75rem; background: var(--bg); border-radius: 4px; margin: 0.5rem 0; }
+.recording-detail .summary { line-height: 1.6; font-size: 0.85rem; }
+.recording-detail .summary h1, .recording-detail .summary h2, .recording-detail .summary h3 { color: var(--accent); margin: 0.75rem 0 0.3rem; }
+.recording-detail .summary ul { padding-left: 1.5rem; }
+.recording-detail .summary li { margin: 0.2rem 0; }
+
+.step-list { list-style: none; }
+.step-list li { padding: 0.4rem 0; color: var(--dim); display: flex; align-items: center; gap: 0.5rem; }
+.step-list li.active { color: var(--fg); }
+.step-list li.done { color: var(--green); }
+.step-list li.error { color: var(--red); }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Pocket Libre</h1>
+  <span class="subtitle">Your recordings, your keys, your data.</span>
+  <div class="status-dot" id="statusDot" title="Not connected"></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-panel="dashboard">Dashboard</div>
+  <div class="tab" data-panel="device">Device Recordings</div>
+  <div class="tab" data-panel="library">Library</div>
+  <div class="tab" data-panel="settings">Settings</div>
+</div>
+
+<div class="content">
+
+  <!-- Dashboard -->
+  <div class="panel active" id="dashboard">
+    <div class="card">
+      <h3>Device Status</h3>
+      <div id="deviceStatus">
+        <div class="empty">Click "Refresh" to connect to your Pocket device.</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn primary" onclick="refreshStatus()">Refresh Status</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Quick Actions</h3>
+      <div class="btn-group">
+        <button class="btn" onclick="switchTab('device'); fetchDeviceRecordings()">View Device Recordings</button>
+        <button class="btn" onclick="switchTab('library'); fetchLocalRecordings()">View Library</button>
+        <button class="btn" onclick="switchTab('settings')">Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Device Recordings -->
+  <div class="panel" id="device">
+    <div class="card">
+      <h3>Recordings on Device</h3>
+      <div id="deviceRecordings">
+        <div class="empty">Click "Load Recordings" to see what's on your Pocket.</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn primary" onclick="fetchDeviceRecordings()">Load Recordings</button>
+      </div>
+    </div>
+    <div class="card" id="processCard" style="display:none">
+      <h3>Operation Progress</h3>
+      <ul class="step-list" id="stepList"></ul>
+      <div class="progress-bar"><div class="fill" id="opProgress" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- Library -->
+  <div class="panel" id="library">
+    <div class="card">
+      <h3>Processed Recordings</h3>
+      <div id="localRecordings">
+        <div class="empty">No recordings yet. Download and process recordings from the Device tab.</div>
+      </div>
+      <div class="btn-group">
+        <button class="btn primary" onclick="fetchLocalRecordings()">Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="panel" id="settings">
+    <div class="card">
+      <h3>Device</h3>
+      <div class="form-group">
+        <label>Device Address</label>
+        <input type="text" id="cfgAddress" placeholder="YOUR-DEVICE-ADDRESS">
+        <div class="hint">BLE address of your Pocket. Run <code>pocket-libre scan --filter pkt</code> to find it.</div>
+      </div>
+      <div class="form-group">
+        <label>Session Key</label>
+        <input type="text" id="cfgSessionKey" placeholder="xJiEbRKnKrhCqvoZ">
+        <div class="hint">Authentication key. Default usually works.</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>API Keys</h3>
+      <div class="form-group">
+        <label>Anthropic API Key</label>
+        <input type="password" id="cfgAnthropicKey" placeholder="sk-ant-...">
+        <div class="hint">For AI summaries (~$0.001/recording). Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank">console.anthropic.com</a></div>
+      </div>
+      <div class="form-group">
+        <label>HuggingFace Token</label>
+        <input type="password" id="cfgHfToken" placeholder="hf_...">
+        <div class="hint">Optional. Enables speaker identification. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Preferences</h3>
+      <div class="form-group">
+        <label>Output Directory</label>
+        <input type="text" id="cfgOutputDir" placeholder="~/Pocket Libre">
+      </div>
+      <div class="form-group">
+        <label>Whisper Model</label>
+        <select id="cfgWhisperModel">
+          <option value="tiny.en">tiny.en (fastest, least accurate)</option>
+          <option value="base.en" selected>base.en (good balance)</option>
+          <option value="small.en">small.en (better accuracy)</option>
+          <option value="medium.en">medium.en (high accuracy)</option>
+          <option value="large">large (best accuracy, slow)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Summary Style</label>
+        <select id="cfgSummaryStyle">
+          <option value="meeting">Meeting (action items, decisions)</option>
+          <option value="notes">Notes (key ideas)</option>
+          <option value="call">Call (follow-ups)</option>
+          <option value="raw">Raw (general summary)</option>
+        </select>
+      </div>
+    </div>
+    <div class="btn-group">
+      <button class="btn primary" onclick="saveSettings()">Save Settings</button>
+      <button class="btn" onclick="testConnection()">Test Connection</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => switchTab(tab.dataset.panel));
+});
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.panel === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === name));
+}
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// Dashboard
+async function refreshStatus() {
+  const el = document.getElementById('deviceStatus');
+  el.innerHTML = '<div class="empty"><span class="spinner"></span> Connecting...</div>';
+  const dot = document.getElementById('statusDot');
+
+  try {
+    const r = await fetch('/api/device/status');
+    if (!r.ok) {
+      const err = await r.json();
+      throw new Error(err.detail || r.statusText);
+    }
+    const d = await r.json();
+    dot.className = 'status-dot connected';
+    dot.title = 'Connected';
+
+    const storagePct = d.storage_total_kb > 0 ? Math.round(100 * d.storage_used_kb / d.storage_total_kb) : 0;
+    el.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat"><div class="value">${d.battery}%</div><div class="label">Battery</div></div>
+        <div class="stat"><div class="value">${d.firmware}</div><div class="label">Firmware</div></div>
+        <div class="stat"><div class="value">${storagePct}%</div><div class="label">Storage Used</div></div>
+        <div class="stat"><div class="value">${d.state_name}</div><div class="label">State</div></div>
+      </div>
+    `;
+  } catch (e) {
+    dot.className = 'status-dot error';
+    dot.title = 'Error';
+    el.innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+// Device Recordings
+async function fetchDeviceRecordings() {
+  const el = document.getElementById('deviceRecordings');
+  el.innerHTML = '<div class="empty"><span class="spinner"></span> Loading...</div>';
+
+  try {
+    const r = await fetch('/api/device/recordings');
+    if (!r.ok) {
+      const err = await r.json();
+      throw new Error(err.detail || r.statusText);
+    }
+    const recs = await r.json();
+    if (recs.length === 0) {
+      el.innerHTML = '<div class="empty">No recordings on device.</div>';
+      return;
+    }
+
+    let html = `<table><thead><tr><th>Date</th><th>Timestamp</th><th>Size</th><th>Duration</th><th>Actions</th></tr></thead><tbody>`;
+    for (const rec of recs) {
+      html += `<tr>
+        <td>${rec.date}</td>
+        <td>${rec.timestamp}</td>
+        <td>${rec.size_kb} KB</td>
+        <td>${rec.duration_estimate}</td>
+        <td>
+          <button class="btn" onclick="startDownload('${rec.date}','${rec.timestamp}')">Download</button>
+          <button class="btn primary" onclick="startProcess('${rec.date}','${rec.timestamp}')">Download & Process</button>
+        </td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`;
+  }
+}
+
+function startDownload(date, ts) { runSSE(`/api/download/${date}/${ts}`); }
+function startProcess(date, ts) { runSSE(`/api/process/${date}/${ts}`); }
+
+function runSSE(url) {
+  const card = document.getElementById('processCard');
+  const stepList = document.getElementById('stepList');
+  const progressBar = document.getElementById('opProgress');
+  card.style.display = 'block';
+  stepList.innerHTML = '';
+  progressBar.style.width = '0%';
+
+  const steps = {};
+  const source = new EventSource(url);
+
+  source.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    if (data.step === 'error') {
+      source.close();
+      addStep(steps, stepList, data.step, data.message, 'error');
+      toast(data.message, 'error');
+      return;
+    }
+
+    if (data.step === 'complete') {
+      source.close();
+      addStep(steps, stepList, data.step, data.message, 'done');
+      progressBar.style.width = '100%';
+      toast('Operation complete!', 'success');
+      fetchLocalRecordings();
+      return;
+    }
+
+    if (data.progress !== undefined) {
+      progressBar.style.width = data.progress + '%';
+    }
+
+    addStep(steps, stepList, data.step, data.message || `${data.progress}%`, 'active');
+  };
+
+  source.onerror = () => {
+    source.close();
+    toast('Connection lost', 'error');
+  };
+}
+
+function addStep(steps, list, name, msg, state) {
+  if (!steps[name]) {
+    const li = document.createElement('li');
+    li.id = 'step-' + name;
+    list.appendChild(li);
+    steps[name] = li;
+  }
+  const li = steps[name];
+  // Mark previous active steps as done
+  if (state === 'active') {
+    list.querySelectorAll('li.active').forEach(l => { if (l !== li) { l.className = 'done'; l.innerHTML = l.innerHTML.replace(/<span class="spinner"><\/span>/, ''); } });
+  }
+  const icon = state === 'active' ? '<span class="spinner"></span>' : state === 'done' ? '' : '';
+  li.className = state;
+  li.innerHTML = `${icon} <strong>${name}:</strong> ${msg}`;
+}
+
+// Library
+async function fetchLocalRecordings() {
+  const el = document.getElementById('localRecordings');
+  el.innerHTML = '<div class="empty"><span class="spinner"></span> Loading...</div>';
+
+  try {
+    const r = await fetch('/api/local/recordings');
+    const recs = await r.json();
+
+    if (recs.length === 0) {
+      el.innerHTML = '<div class="empty">No recordings yet. Download and process recordings from the Device tab.</div>';
+      return;
+    }
+
+    let html = '';
+    for (const rec of recs) {
+      const sizeStr = (rec.size_bytes / 1024).toFixed(0);
+      const badges = [];
+      if (rec.has_transcript) badges.push('<span style="color:var(--green)">transcript</span>');
+      if (rec.has_summary) badges.push('<span style="color:var(--cyan)">summary</span>');
+
+      html += `
+        <div class="card" style="cursor:pointer" onclick="toggleDetail(this, '${rec.date}', '${rec.timestamp}')">
+          <div style="display:flex; justify-content:space-between; align-items:center">
+            <div>
+              <strong>${rec.date} / ${rec.timestamp}</strong>
+              <span style="color:var(--dim); margin-left:1rem">${sizeStr} KB</span>
+            </div>
+            <div style="display:flex;gap:0.5rem">${badges.join(' ')}</div>
+          </div>
+          <div class="recording-detail" id="detail-${rec.date}-${rec.timestamp}"></div>
+        </div>`;
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="color:var(--red)">Failed to load: ${e.message}</div>`;
+  }
+}
+
+async function toggleDetail(card, date, ts) {
+  const detail = document.getElementById(`detail-${date}-${ts}`);
+  if (detail.classList.contains('open')) {
+    detail.classList.remove('open');
+    return;
+  }
+  detail.classList.add('open');
+
+  let html = `<audio controls src="/api/local/${date}/${ts}/audio"></audio>`;
+
+  try {
+    const tr = await fetch(`/api/local/${date}/${ts}/transcript`);
+    if (tr.ok) {
+      const text = await tr.text();
+      html += `<h4 style="color:var(--accent);margin:0.5rem 0">Transcript</h4><pre>${escapeHtml(text)}</pre>`;
+    }
+  } catch {}
+
+  try {
+    const sr = await fetch(`/api/local/${date}/${ts}/summary`);
+    if (sr.ok) {
+      const md = await sr.text();
+      html += `<h4 style="color:var(--accent);margin:0.5rem 0">Summary</h4><div class="summary">${renderMarkdown(md)}</div>`;
+    }
+  } catch {}
+
+  detail.innerHTML = html;
+}
+
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderMarkdown(md) {
+  // Simple markdown renderer
+  return md
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+    .replace(/\n{2,}/g, '<br><br>')
+    .replace(/\n/g, '<br>')
+    .replace(/---/g, '<hr>');
+}
+
+// Settings
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/config');
+    const cfg = await r.json();
+
+    document.getElementById('cfgAddress').value = cfg.device?.address || '';
+    document.getElementById('cfgSessionKey').value = cfg.device?.session_key || '';
+    document.getElementById('cfgOutputDir').value = cfg.output?.directory || '~/Pocket Libre';
+
+    // API keys - show masked if set
+    const akField = document.getElementById('cfgAnthropicKey');
+    if (cfg.api?._anthropic_key_set) akField.placeholder = cfg.api.anthropic_key + ' (saved)';
+    else akField.value = cfg.api?.anthropic_key || '';
+
+    const hfField = document.getElementById('cfgHfToken');
+    if (cfg.api?._hf_token_set) hfField.placeholder = cfg.api.hf_token + ' (saved)';
+    else hfField.value = cfg.api?.hf_token || '';
+
+    if (cfg.defaults?.whisper_model) document.getElementById('cfgWhisperModel').value = cfg.defaults.whisper_model;
+    if (cfg.defaults?.summary_style) document.getElementById('cfgSummaryStyle').value = cfg.defaults.summary_style;
+  } catch {}
+}
+
+async function saveSettings() {
+  const config = {
+    device: {
+      address: document.getElementById('cfgAddress').value,
+      session_key: document.getElementById('cfgSessionKey').value,
+    },
+    api: {},
+    output: {
+      directory: document.getElementById('cfgOutputDir').value,
+    },
+    defaults: {
+      whisper_model: document.getElementById('cfgWhisperModel').value,
+      summary_style: document.getElementById('cfgSummaryStyle').value,
+    },
+  };
+
+  const ak = document.getElementById('cfgAnthropicKey').value;
+  if (ak) config.api.anthropic_key = ak;
+  const hf = document.getElementById('cfgHfToken').value;
+  if (hf) config.api.hf_token = hf;
+
+  try {
+    const r = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (r.ok) toast('Settings saved!', 'success');
+    else toast('Failed to save', 'error');
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function testConnection() {
+  toast('Testing connection...', 'info');
+  try {
+    const r = await fetch('/api/device/status');
+    if (r.ok) {
+      const d = await r.json();
+      toast(`Connected! Battery: ${d.battery}%`, 'success');
+    } else {
+      const err = await r.json();
+      toast(err.detail || 'Connection failed', 'error');
+    }
+  } catch (e) {
+    toast('Connection failed: ' + e.message, 'error');
+  }
+}
+
+// Init
+loadSettings();
+fetchLocalRecordings();
+</script>
+</body>
+</html>

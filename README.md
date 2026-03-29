@@ -2,162 +2,161 @@
 
 **Liberate your Pocket AI recorder from the cloud.**
 
-Pocket Libre is a local-first CLI tool that connects directly to your [Pocket](https://heypocket.com) AI voice recorder over Bluetooth Low Energy, pulls raw audio, and transcribes it locally using OpenAI's Whisper. No app. No cloud. No forced summaries. Your conversations stay on your machine.
+Pocket Libre replaces the vendor app for your [Pocket](https://heypocket.com) AI voice recorder. Download recordings directly over Bluetooth, transcribe locally with Whisper, identify speakers, and summarize with your own API keys. No vendor cloud. Your conversations stay on your machine.
 
-## Why
+## Quick Start
 
-The Pocket hardware is great: tap to record, long battery, solid mics. But the default workflow forces all your audio through their cloud for transcription and summarization. You don't get a choice. Your private conversations, meetings, and ideas get shipped to a server before you can even listen to them.
-
-Pocket Libre gives you that choice back.
-
-## Protocol (Confirmed)
-
-The Pocket streams **standard MP3 audio** over BLE. No proprietary codec. No encryption. No DRM.
-
-| Detail | Value |
-|--------|-------|
-| Transport | Bluetooth Low Energy (BLE 5.x) |
-| Audio format | MPEG-2 Layer 3 (MP3) |
-| Sample rate | 16 kHz |
-| Channels | Mono |
-| Bitrate | ~32 kbps |
-| Audio characteristic | `001120a1-2233-4455-6677-889912345678` |
-| Device name prefix | `PKT01` |
-
-See [PROTOCOL.md](PROTOCOL.md) for the full service map and discovery process.
-
-## Prerequisites
-
-- Python 3.10+
-- A Mac with Bluetooth (tested on Apple Silicon)
-- Your Pocket AI recorder
-
-## Setup
+### 1. Install
 
 ```bash
 git clone https://github.com/shahcolate/pocket-libre.git
 cd pocket-libre
-
-conda create -n pocket python=3.12 -y
-conda activate pocket
-conda install -c conda-forge llvmlite numba -y
 pip install -e .
 ```
 
-## Quick Start
+> **For speaker identification** (optional): `pip install -e ".[diarize]"` (requires PyTorch)
 
-### 1. Find your Pocket
-
-Turn on your Pocket. Make sure it's not connected to the official app (turn off Bluetooth on your phone or enable Airplane Mode).
+### 2. Setup
 
 ```bash
-pocket-libre scan --filter pkt
+pocket-libre setup
 ```
 
-Copy the full address from the output.
+The setup wizard walks you through:
+- Finding your Pocket device (BLE scan)
+- Entering your API keys (Anthropic for summaries, HuggingFace for speaker ID)
+- Choosing your output directory and preferences
 
-### 2. Sniff audio
+### 3. Use
 
+**Web interface** (recommended):
 ```bash
-pocket-libre sniff --address <ADDRESS> --duration 30
+pocket-libre web
 ```
+Opens a browser UI at `http://localhost:8265` where you can view device status, download recordings, play audio, read transcripts and summaries — no terminal required.
 
-Start a recording on your Pocket, talk for a few seconds, then stop. The sniff captures live BLE data and auto-saves as MP3 when audio is detected.
-
-### 3. Play it
-
+**Command line**:
 ```bash
-open sniff_dump.mp3
+pocket-libre status              # Check battery, storage, firmware
+pocket-libre list                # List recordings on device
+pocket-libre download-all        # Download all recordings
+pocket-libre sync                # Capture + transcribe + summarize
+pocket-libre process --input recording.mp3  # Process an existing file
 ```
 
-### 4. Transcribe locally
+> **Tip**: After running `pocket-libre setup`, you don't need to pass `--address` or API keys on every command — they're saved in `~/.pocket-libre/config.toml`.
 
-```bash
-pocket-libre transcribe --input sniff_dump.mp3 --model base.en
-```
+## Web Interface
 
-Runs Whisper on your machine. Nothing leaves your device.
+Run `pocket-libre web` to launch the browser-based UI:
 
-### 5. One-command pipeline
-
-```bash
-pocket-libre sync --address <ADDRESS>
-```
-
-Connect, capture MP3, transcribe with Whisper, identify speakers, summarize with Claude Haiku (~$0.001/recording). Everything saved to `~/pocket-recordings/`.
-
-### 6. Process existing files
-
-```bash
-pocket-libre process --input recording.mp3
-```
+- **Dashboard** — device battery, firmware, storage at a glance
+- **Device Recordings** — see what's on your Pocket, download or process with one click
+- **Library** — browse downloaded recordings with audio player, transcripts, and summaries
+- **Settings** — configure device address, API keys, whisper model, and output directory
 
 ## All Commands
 
 | Command | Description |
 |---------|-------------|
+| `pocket-libre setup` | Interactive setup wizard |
+| `pocket-libre web` | Launch web interface |
+| `pocket-libre config` | View/edit configuration |
 | `pocket-libre scan` | Find nearby BLE devices |
-| `pocket-libre explore` | Dump GATT services and characteristics |
-| `pocket-libre sniff` | Subscribe to all notify characteristics (discovery mode) |
-| `pocket-libre capture` | Capture audio from a specific characteristic |
-| `pocket-libre convert` | Convert raw audio to WAV |
+| `pocket-libre status` | Device battery, firmware, storage |
+| `pocket-libre list` | List recordings on device |
+| `pocket-libre download` | Download a specific recording |
+| `pocket-libre download-all` | Download all recordings |
+| `pocket-libre wifi-transfer` | Download via WiFi (faster) |
+| `pocket-libre sync` | Full pipeline: capture + transcribe + summarize |
+| `pocket-libre process` | Process an existing audio file |
 | `pocket-libre transcribe` | Transcribe audio locally with Whisper |
-| `pocket-libre sync` | Full pipeline: capture, transcribe, diarize, summarize |
-| `pocket-libre process` | Process an existing audio file through the pipeline |
+| `pocket-libre explore` | Dump GATT services and characteristics |
+| `pocket-libre sniff` | Subscribe to all BLE notifications |
+| `pocket-libre probe` | Probe write characteristics |
+| `pocket-libre convert` | Convert raw audio to WAV |
+
+## Configuration
+
+All settings are stored in `~/.pocket-libre/config.toml`:
+
+```toml
+[device]
+address = "YOUR-DEVICE-ADDRESS"
+session_key = "xJiEbRKnKrhCqvoZ"
+
+[api]
+anthropic_key = "sk-ant-..."
+hf_token = "hf_..."
+
+[output]
+directory = "~/Pocket Libre"
+
+[defaults]
+whisper_model = "base.en"
+summary_style = "meeting"
+```
+
+You can also set values directly:
+```bash
+pocket-libre config --set device.address=YOUR_ADDRESS
+pocket-libre config --set api.anthropic_key=sk-ant-...
+```
+
+## API Keys
+
+| Key | What it does | Cost | Where to get it |
+|-----|-------------|------|-----------------|
+| **Anthropic** | AI summaries of recordings | ~$0.001/recording | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
+| **HuggingFace** | Speaker identification (who said what) | Free | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
+
+Both are optional. Transcription always runs locally via Whisper — no API key needed.
 
 ## Economics
 
 | | Pocket Pro | Pocket Libre |
 |--|-----------|-------------|
 | Transcription | Cloud (their servers) | Local Whisper (your CPU) |
-| Summarization | Cloud (forced) | Claude Haiku API (~$0.001/recording) |
+| Summarization | Cloud (forced) | Claude Haiku (~$0.001/recording) |
 | Annual cost | $79-179/year | ~$2/year |
-| Privacy | Your audio leaves your device | Nothing leaves your device* |
+| Privacy | Audio leaves your device | Nothing leaves your device* |
 
 *Summarization uses Anthropic API if enabled. Transcription is fully local.
+
+## Protocol
+
+The Pocket uses a simple ASCII command protocol over BLE GATT. Audio is standard MP3 (16kHz mono, ~32kbps). No encryption, no DRM.
+
+See [PROTOCOL.md](PROTOCOL.md) for the full protocol reference.
 
 ## Project Status
 
 - [x] BLE device scanning and discovery
-- [x] GATT service/characteristic enumeration
-- [x] Multi-characteristic sniffing with live dashboard
-- [x] Audio format identification (MP3 confirmed, playable)
+- [x] Full command protocol decoded (APP&/MCU&)
+- [x] Device status, file listing, stored recording download
 - [x] MP3 audio capture and playback
 - [x] Local Whisper transcription
-- [x] Speaker diarization (pyannote.audio optional)
+- [x] Speaker diarization (pyannote.audio)
 - [x] Claude Haiku summarization (4 styles)
-- [x] Full sync pipeline (capture > transcribe > diarize > summarize)
-- [x] PacketLogger HCI capture analysis
-- [ ] Stored recording retrieval (pull past recordings from device storage)
-- [ ] WiFi bulk transfer
+- [x] Full sync pipeline
+- [x] Web interface
+- [x] Config file and setup wizard
+- [ ] WiFi bulk transfer (protocol mapped, HTTP endpoint TBD)
 - [ ] Auto-connect and background sync
-
-## How We Got Here
-
-This project started with a simple question: can I use my Pocket recorder without routing my private conversations through someone else's cloud?
-
-The answer is yes. The Pocket uses standard BLE GATT services and streams plain MP3 audio. We discovered this by:
-
-1. Scanning the device's service tree with nRF Connect
-2. Subscribing to all notify characteristics simultaneously
-3. Identifying the high-volume data stream on `001120a1`
-4. Recognizing the `0xFFF3` MP3 frame sync word in the raw bytes
-
-No encryption. No obfuscation. Just MP3.
 
 ## Contributing
 
 If you own a Pocket and want to help:
 
-1. Run `pocket-libre explore` and share the output (different firmware versions may have different UUIDs)
-2. Help map the write commands (what does the app send to request stored recordings?)
-3. Capture BLE traffic with PacketLogger during an app sync session
+1. Run `pocket-libre explore` and share the output
+2. Help discover the WiFi HTTP endpoint (connect to device AP, probe ports)
+3. Capture BLE traffic with PacketLogger during an app WiFi transfer
 
 Open an issue or PR. All contributions welcome.
 
 ## Legal
 
-This project reverse-engineers a Bluetooth protocol for personal interoperability purposes, which is protected under DMCA Section 1201 exemptions. You own your device. You own your recordings. This tool helps you access both without a mandatory cloud intermediary.
+This project reverse-engineers a Bluetooth protocol for personal interoperability purposes, protected under DMCA Section 1201 exemptions. You own your device. You own your recordings.
 
 ## License
 
