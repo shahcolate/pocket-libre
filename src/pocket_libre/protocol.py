@@ -1,7 +1,11 @@
 """Known BLE protocol constants for the Pocket AI recorder.
 
-Discovered via nRF Connect on device PKT01_GREY_XXXXXXXX.
-These UUIDs map the device's GATT service tree.
+Discovered via nRF Connect and PacketLogger HCI capture analysis
+on a PKT01 device.
+
+The device uses a simple ASCII command protocol:
+  - App writes "APP&<CMD>" to the command characteristic
+  - Device responds "MCU&<CMD>&<DATA>" via notification
 """
 
 # ──────────────────────────────────────────────
@@ -20,77 +24,51 @@ BATTERY_LEVEL_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"
 
 # ──────────────────────────────────────────────
 # FFD0: UART-like control service
-# Pattern matches Nordic UART Service clones.
-# Likely used for general command/control between
-# the app and device (settings, sync triggers, etc.)
 # ──────────────────────────────────────────────
 UART_SERVICE = "0000ffd0-0000-1000-8000-00805f9b34fb"
-
-# Write commands to device
-UART_TX_CHAR = "0000ffd1-0000-1000-8000-00805f9b34fb"  # Write, Write Without Response
-
-# Receive responses from device
-UART_RX_CHAR = "0000ffd2-0000-1000-8000-00805f9b34fb"  # Notify
-
-# Bidirectional (command + response on same char)
+UART_TX_CHAR = "0000ffd1-0000-1000-8000-00805f9b34fb"   # Write, Write Without Response
+UART_RX_CHAR = "0000ffd2-0000-1000-8000-00805f9b34fb"   # Notify
 UART_BIDI_CHAR = "0000ffd3-0000-1000-8000-00805f9b34fb"  # Write, Write Without Response, Notify
 
 
 # ──────────────────────────────────────────────
-# E49A3001: Custom service #1
-# Write/Notify pair. Purpose TBD.
-# Could be file listing, recording metadata,
-# or a secondary control channel.
+# E49A3001: Custom service #1 (command channel)
+# Confirmed via PacketLogger: ATT handle 0x002b (write)
+# and 0x0030 (notify) carry the APP&/MCU& protocol.
 # ──────────────────────────────────────────────
 CUSTOM1_SERVICE = "e49a3001-f69a-11e8-8eb2-f2801f1b9fd1"
-CUSTOM1_WRITE_CHAR = "e49a3002-f69a-11e8-8eb2-f2801f1b9fd1"  # Write, Write Without Response
-CUSTOM1_NOTIFY_CHAR = "e49a3003-f69a-11e8-8eb2-f2801f1b9fd1"  # Notify
+CUSTOM1_WRITE_CHAR = "e49a3002-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x002b — APP& commands
+CUSTOM1_NOTIFY_CHAR = "e49a3003-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x0030 — MCU& responses
+
+# Aliases for clarity
+CMD_WRITE_CHAR = CUSTOM1_WRITE_CHAR   # Write APP& commands here
+CMD_NOTIFY_CHAR = CUSTOM1_NOTIFY_CHAR  # MCU& responses arrive here
 
 
 # ──────────────────────────────────────────────
-# E49A25F8: Custom service #2
-# Write/Notify pair. Purpose TBD.
+# E49A25F8: Custom service #2 (audio data)
+# ATT handle 0x002d carries MP3 audio notifications.
 # ──────────────────────────────────────────────
 CUSTOM2_SERVICE = "e49a25f8-f69a-11e8-8eb2-f2801f1b9fd1"
-CUSTOM2_WRITE_CHAR = "e49a25e0-f69a-11e8-8eb2-f2801f1b9fd1"  # Write, Write Without Response
-CUSTOM2_NOTIFY_CHAR = "e49a28e1-f69a-11e8-8eb2-f2801f1b9fd1"  # Notify
+CUSTOM2_WRITE_CHAR = "e49a25e0-f69a-11e8-8eb2-f2801f1b9fd1"
+CUSTOM2_NOTIFY_CHAR = "e49a28e1-f69a-11e8-8eb2-f2801f1b9fd1"  # ATT handle 0x002d — MP3 audio
+
+# Alias
+AUDIO_NOTIFY_CHAR = CUSTOM2_NOTIFY_CHAR  # MP3 audio data arrives here
 
 
 # ──────────────────────────────────────────────
-# 001120A0: Audio data service (HIGH CONFIDENCE)
-#
-# This service was observed actively streaming
-# large binary payloads via 001120A1 without any
-# explicit trigger command. This is the most likely
-# candidate for audio data transfer.
+# 001120A0: Audio data service (legacy/secondary)
 # ──────────────────────────────────────────────
 AUDIO_SERVICE = "001120a0-2233-4455-6677-889912345678"
-
-# Command channel: write to request recordings, control transfer
-AUDIO_WRITE_CHAR = "001120a2-2233-4455-6677-889912345678"  # Write Without Response
-
-# PRIMARY AUDIO DATA STREAM
-# Observed streaming large hex payloads unprompted.
-# Subscribe to this characteristic to receive audio data.
-AUDIO_DATA_CHAR = "001120a1-2233-4455-6677-889912345678"  # Notify
-
-# Metadata/status channel
-# Observed value: 4D43 5526 5526 3732 3030 3131 3938
-# Decodes partially to ASCII "MCU&..." - likely firmware/device info
-AUDIO_META_CHAR = "001120a3-2233-4455-6677-889912345678"  # Write Without Response, Notify
+AUDIO_WRITE_CHAR = "001120a2-2233-4455-6677-889912345678"
+AUDIO_DATA_CHAR = "001120a1-2233-4455-6677-889912345678"
+AUDIO_META_CHAR = "001120a3-2233-4455-6677-889912345678"
 
 
 # ──────────────────────────────────────────────
 # Audio format (CONFIRMED via capture 2026-03-28)
 # ──────────────────────────────────────────────
-# The device streams standard MP3 frames over BLE.
-# Frame sync word: 0xFFF3
-# Header: 0xFFF348C4 = MPEG-2, Layer 3, mono, ~16kHz, ~32kbps
-# No proprietary codec. No encryption. Just MP3.
-#
-# Captured data can be saved directly as .mp3 and played.
-# The first frame may contain silence padding (0x55 bytes).
-
 AUDIO_FORMAT = "mp3"
 MP3_SYNC_WORD = b"\xff\xf3"
 MP3_FRAME_HEADER = b"\xff\xf3\x48\xc4"
@@ -100,21 +78,48 @@ DEFAULT_BITRATE_KBPS = 32
 
 
 # ──────────────────────────────────────────────
+# APP&/MCU& Command Protocol
+# (Decoded from PacketLogger HCI capture 2026-03-29)
+#
+# All commands are ASCII strings written to CMD_WRITE_CHAR.
+# Responses arrive as notifications on CMD_NOTIFY_CHAR.
+# Audio data arrives on AUDIO_NOTIFY_CHAR.
+# ──────────────────────────────────────────────
+CMD_PREFIX = "APP&"
+RSP_PREFIX = "MCU&"
+
+# WiFi status codes (from MCU&WIFIS&N)
+WIFI_STATUS_INIT = 0       # WiFi mode initializing
+WIFI_STATUS_READY = 1      # Ready for transfer
+WIFI_STATUS_STARTING = 2   # AP starting up
+WIFI_STATUS_CONNECTING = 3 # AP created, waiting for client
+
+
+# ──────────────────────────────────────────────
 # All notify characteristics (for auto-detection)
 # ──────────────────────────────────────────────
 ALL_NOTIFY_CHARS = [
     UART_RX_CHAR,
     UART_BIDI_CHAR,
-    CUSTOM1_NOTIFY_CHAR,
-    CUSTOM2_NOTIFY_CHAR,
+    CMD_NOTIFY_CHAR,
+    AUDIO_NOTIFY_CHAR,
     AUDIO_DATA_CHAR,
     AUDIO_META_CHAR,
 ]
 
 # Priority order for audio capture auto-detection
 AUDIO_CHAR_PRIORITY = [
-    AUDIO_DATA_CHAR,      # Most likely: was actively streaming
-    CUSTOM1_NOTIFY_CHAR,  # Could be audio on a different channel
-    CUSTOM2_NOTIFY_CHAR,  # Could be audio on a different channel
-    UART_RX_CHAR,         # Less likely but possible
+    AUDIO_NOTIFY_CHAR,   # Primary: confirmed MP3 data on handle 0x002d
+    AUDIO_DATA_CHAR,     # Secondary: 001120a1
+    UART_RX_CHAR,
+]
+
+# All write characteristics (for command probing)
+ALL_WRITE_CHARS = [
+    CMD_WRITE_CHAR,      # Primary: APP& commands on handle 0x002b
+    UART_TX_CHAR,
+    UART_BIDI_CHAR,
+    CUSTOM2_WRITE_CHAR,
+    AUDIO_WRITE_CHAR,
+    AUDIO_META_CHAR,
 ]
