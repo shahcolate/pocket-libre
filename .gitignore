@@ -10,5 +10,8 @@ build/
 *.wav
 *.pcap
 *.pklg
+*.mp3
+*.har
+*.tar.gz
 .ruff_cache/
 .pytest_cache/
