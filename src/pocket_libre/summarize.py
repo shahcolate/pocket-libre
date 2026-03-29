@@ -123,6 +123,14 @@ def summarize_transcript(
     return summary
 
 
+def estimate_cost(transcript_text: str) -> str:
+    """Estimate API cost before calling. Returns human-readable string."""
+    est_input = len(transcript_text) // 4
+    est_output = 500
+    cost = (est_input * 0.25 + est_output * 1.25) / 1_000_000
+    return f"~${cost:.4f}"
+
+
 def format_transcript_for_summary(segments: list[dict]) -> str:
     """Format labeled segments into a readable transcript string."""
     lines = []
