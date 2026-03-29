@@ -49,7 +49,7 @@ class Recording:
 class PocketCommander:
     """Send commands to a Pocket device and collect responses."""
 
-    def __init__(self, address: str, timeout: float = 10.0):
+    def __init__(self, address: str, timeout: float = 20.0):
         self.address = address
         self.timeout = timeout
         self.client: BleakClient | None = None
@@ -59,7 +59,17 @@ class PocketCommander:
         self._audio_event = asyncio.Event()
 
     async def __aenter__(self):
-        self.client = BleakClient(self.address, timeout=self.timeout)
+        # Scan first to ensure the device is discovered by CoreBluetooth
+        from bleak import BleakScanner
+        device = await BleakScanner.find_device_by_address(
+            self.address, timeout=self.timeout
+        )
+        if device is None:
+            raise Exception(
+                f"Device {self.address} not found. "
+                "Make sure it's awake (press the button) and nearby."
+            )
+        self.client = BleakClient(device, timeout=self.timeout)
         await self.client.connect()
 
         # Subscribe to command responses
@@ -91,7 +101,7 @@ class PocketCommander:
         self._response_event.clear()
 
         payload = f"{CMD_PREFIX}{command}".encode("ascii")
-        await self.client.write_gatt_char(CMD_WRITE_CHAR, payload, response=True)
+        await self.client.write_gatt_char(CMD_WRITE_CHAR, payload, response=False)
 
         # Wait for response(s) — some commands return multiple lines
         await asyncio.sleep(0.3)
