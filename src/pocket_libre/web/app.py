@@ -16,7 +16,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from pocket_libre.commands import PocketCommander, Recording
+from pocket_libre.commands import PocketCommander, Recording, download_with_retry
 from pocket_libre.config import (
     load_config, save_config,
     resolve_address, resolve_session_key,
@@ -82,6 +82,31 @@ async def update_config(update: ConfigUpdate):
                 config[section][k] = v
     save_config(config)
     return {"status": "ok"}
+
+
+# ── Device Scan & Status ────────────────────────
+
+
+@app.get("/api/scan")
+async def scan_for_devices():
+    """Scan for Pocket devices over BLE."""
+    try:
+        from bleak import BleakScanner
+        devices = await BleakScanner.discover(timeout=5.0, return_adv=True)
+        results = []
+        for d, adv in devices.values():
+            if d.name and "pkt" in d.name.lower():
+                rssi = adv.rssi if adv else None
+                results.append({"name": d.name, "address": d.address, "rssi": rssi})
+        return results
+    except Exception as e:
+        raise HTTPException(502, f"Scan failed: {e}")
+
+
+@app.get("/api/device/busy")
+async def device_busy():
+    """Check if device is busy with a BLE operation."""
+    return {"busy": ble_lock.locked()}
 
 
 # ── Device Endpoints ────────────────────────────
@@ -320,20 +345,11 @@ async def process_recording(date: str, timestamp: str):
         # Diarize
         yield _sse({"step": "diarize", "message": "Identifying speakers..."})
         try:
-            from pocket_libre.diarize import diarize_pyannote, diarize_simple, merge_transcript_with_speakers
+            from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
 
-            speaker_segments = []
-            if hf_token:
-                try:
-                    speaker_segments = await loop.run_in_executor(
-                        None, diarize_pyannote, str(audio_path), hf_token
-                    )
-                except Exception:
-                    pass
-
-            if not speaker_segments:
-                speaker_segments = diarize_simple(segments)
-
+            speaker_segments = await loop.run_in_executor(
+                None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
+            )
             labeled = merge_transcript_with_speakers(segments, speaker_segments)
         except Exception:
             labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
@@ -374,6 +390,181 @@ async def process_recording(date: str, timestamp: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── Sync All ───────────────────────────────────
+
+
+@app.get("/api/sync-all")
+async def sync_all():
+    """Download all new recordings, transcribe, and summarize. SSE progress."""
+    config = load_config()
+    address = resolve_address(config)
+    if not address:
+        raise HTTPException(400, "No device address configured.")
+    sk = resolve_session_key(config)
+    out_root = Path(get_output_dir(config))
+    whisper_model = get(config, "defaults", "whisper_model", default="base.en")
+    summary_style = get(config, "defaults", "summary_style", default="meeting")
+    anthropic_key = resolve_anthropic_key(config)
+    hf_token = resolve_hf_token(config)
+
+    if ble_lock.locked():
+        raise HTTPException(409, "Device is busy.")
+
+    async def event_stream():
+        from pocket_libre.protocol import MP3_SYNC_WORD
+
+        # Single BLE connection for listing + all downloads
+        downloaded = []  # list of (rec, audio_path, data) tuples
+        async with ble_lock:
+            try:
+                yield _sse({"step": "scan", "message": "Connecting to device..."})
+                async with PocketCommander(address) as cmd:
+                    if not await cmd.authenticate(sk):
+                        yield _sse({"step": "error", "message": "Authentication failed."})
+                        return
+
+                    all_recs = await cmd.list_all_recordings()
+
+                    if not all_recs:
+                        yield _sse({"step": "complete", "message": "No recordings on device.", "new_count": 0})
+                        return
+
+                    # Determine which are new
+                    new_recs = []
+                    for rec in all_recs:
+                        mp3_path = out_root / rec.date / f"{rec.timestamp}.mp3"
+                        if not mp3_path.exists():
+                            new_recs.append(rec)
+
+                    if not new_recs:
+                        yield _sse({"step": "complete", "message": f"All {len(all_recs)} recordings already synced.", "new_count": 0})
+                        return
+
+                    yield _sse({"step": "scan", "message": f"Found {len(all_recs)} recordings, {len(new_recs)} new"})
+
+                    # Download all new recordings on the same connection
+                    for i, rec in enumerate(new_recs, 1):
+                        rec_dir = out_root / rec.date
+                        rec_dir.mkdir(parents=True, exist_ok=True)
+                        audio_path = rec_dir / f"{rec.timestamp}.mp3"
+
+                        yield _sse({
+                            "step": "download", "recording": i, "total": len(new_recs),
+                            "name": f"{rec.date}/{rec.timestamp}", "progress": 0,
+                        })
+
+                        try:
+                            data = await cmd.download_ble(rec, progress_callback=lambda cur, tot, _i=i, _t=len(new_recs): None)
+
+                            if not data:
+                                yield _sse({"step": "error", "message": f"Empty download for {rec.timestamp}"})
+                                continue
+
+                            # Trim to MP3 sync word
+                            mp3_start = data.find(MP3_SYNC_WORD)
+                            if mp3_start > 0:
+                                data = data[mp3_start:]
+
+                            audio_path.write_bytes(data)
+                            downloaded.append((rec, audio_path))
+                            yield _sse({"step": "download", "recording": i, "total": len(new_recs), "progress": 100,
+                                        "message": f"Downloaded {len(data):,} bytes"})
+
+                            # Brief pause between downloads to let device settle
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            yield _sse({"step": "error", "message": f"Download error for {rec.timestamp}: {e}"})
+                            # Connection may be dead — break out and process what we have
+                            break
+
+            except Exception as e:
+                yield _sse({"step": "error", "message": f"Connection failed: {e}"})
+                if not downloaded:
+                    return
+
+        if not downloaded:
+            yield _sse({"step": "complete", "message": "No recordings downloaded.", "new_count": 0})
+            return
+
+        # Phase 2: Process downloaded recordings (BLE lock released)
+        total = len(downloaded)
+        for i, (rec, audio_path) in enumerate(downloaded, 1):
+            rec_dir = audio_path.parent
+
+            # Transcribe
+            yield _sse({"step": "transcribe", "recording": i, "total": total, "message": "Transcribing..."})
+            try:
+                import whisper
+                loop = asyncio.get_event_loop()
+                model = await loop.run_in_executor(None, whisper.load_model, whisper_model)
+                result = await loop.run_in_executor(None, lambda: model.transcribe(str(audio_path), verbose=False))
+                segments = result.get("segments", [])
+                yield _sse({"step": "transcribe", "recording": i, "total": total,
+                            "message": f"{len(segments)} segments"})
+            except Exception as e:
+                yield _sse({"step": "transcribe", "recording": i, "total": total,
+                            "message": f"Failed: {e}"})
+                continue
+
+            # Diarize
+            try:
+                from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
+                speaker_segments = await loop.run_in_executor(
+                    None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
+                )
+                labeled = merge_transcript_with_speakers(segments, speaker_segments)
+            except Exception:
+                labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
+
+            from pocket_libre.summarize import format_transcript_for_summary
+            transcript_text = format_transcript_for_summary(labeled)
+            transcript_path = rec_dir / f"{rec.timestamp}_transcript.txt"
+            transcript_path.write_text(transcript_text, encoding="utf-8")
+
+            # Summarize
+            if anthropic_key:
+                yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Summarizing..."})
+                try:
+                    from pocket_libre.summarize import summarize_transcript
+                    summary = await loop.run_in_executor(
+                        None,
+                        lambda: summarize_transcript(transcript_text=transcript_text, api_key=anthropic_key, style=summary_style),
+                    )
+                    if summary:
+                        summary_path = rec_dir / f"{rec.timestamp}_summary.md"
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        full_doc = f"# {rec.timestamp} ({ts})\n\n{summary}\n\n---\n\n## Full Transcript\n\n{transcript_text}"
+                        summary_path.write_text(full_doc, encoding="utf-8")
+                        yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Done"})
+                except Exception as e:
+                    yield _sse({"step": "summarize", "recording": i, "total": total, "message": f"Failed: {e}"})
+            else:
+                yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Skipped (no API key)"})
+
+            # Run AI analyses (entities, mind map, etc.)
+            if anthropic_key:
+                enabled_str = get(config, "analysis", "enabled", default="summary,entities")
+                analysis_types = [t.strip() for t in enabled_str.split(",") if t.strip() and t.strip() != "summary"]
+                if analysis_types:
+                    yield _sse({"step": "analyze", "recording": i, "total": total, "message": f"Running {', '.join(analysis_types)}..."})
+                    try:
+                        from pocket_libre.analyze import run_analyses, save_analyses
+                        results = await loop.run_in_executor(
+                            None,
+                            lambda: run_analyses(transcript_text, anthropic_key, analysis_types),
+                        )
+                        if results:
+                            save_analyses(results, rec_dir, rec.timestamp)
+                            yield _sse({"step": "analyze", "recording": i, "total": total,
+                                        "message": f"Done: {', '.join(results.keys())}"})
+                    except Exception as e:
+                        yield _sse({"step": "analyze", "recording": i, "total": total, "message": f"Failed: {e}"})
+
+        yield _sse({"step": "complete", "message": f"Synced {total} recording(s)", "new_count": total})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ── Local Library ───────────────────────────────
 
 
@@ -393,12 +584,16 @@ async def local_recordings():
             stem = mp3.stem
             has_transcript = (date_dir / f"{stem}_transcript.txt").exists()
             has_summary = (date_dir / f"{stem}_summary.md").exists()
+            has_entities = (date_dir / f"{stem}_entities.json").exists()
+            has_mind_map = (date_dir / f"{stem}_mind_map.json").exists()
             recordings.append({
                 "date": date_dir.name,
                 "timestamp": stem,
                 "size_bytes": mp3.stat().st_size,
                 "has_transcript": has_transcript,
                 "has_summary": has_summary,
+                "has_entities": has_entities,
+                "has_mind_map": has_mind_map,
                 "session_id": f"{date_dir.name}/{stem}",
             })
 
@@ -430,6 +625,85 @@ async def get_audio(date: str, timestamp: str):
     if not path.exists():
         raise HTTPException(404, "Audio file not found")
     return FileResponse(path, media_type="audio/mpeg", filename=f"{timestamp}.mp3")
+
+
+# ── Chat & Analysis ─────────────────────────────
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/chat/{date}/{timestamp}")
+async def chat_recording(date: str, timestamp: str, body: ChatRequest):
+    """Ask a question about a recording's transcript."""
+    config = load_config()
+    anthropic_key = resolve_anthropic_key(config)
+    if not anthropic_key:
+        raise HTTPException(400, "No Anthropic API key configured. Add one in Settings.")
+
+    out_root = Path(get_output_dir(config))
+    transcript_path = out_root / date / f"{timestamp}_transcript.txt"
+    if not transcript_path.exists():
+        raise HTTPException(404, "Transcript not found. Process this recording first.")
+
+    transcript = transcript_path.read_text(encoding="utf-8")
+
+    from pocket_libre.analyze import chat_with_recording
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: chat_with_recording(transcript, body.message, anthropic_key),
+    )
+    return {"response": response}
+
+
+@app.get("/api/local/{date}/{timestamp}/analyses")
+async def get_analyses(date: str, timestamp: str):
+    """Get all analysis results for a recording."""
+    config = load_config()
+    rec_dir = Path(get_output_dir(config)) / date
+    if not rec_dir.exists():
+        raise HTTPException(404, "Recording not found")
+
+    from pocket_libre.analyze import load_analyses
+    results = load_analyses(rec_dir, timestamp)
+    return results
+
+
+@app.post("/api/analyze/{date}/{timestamp}")
+async def run_analysis(date: str, timestamp: str):
+    """Run AI analyses on an already-transcribed recording."""
+    config = load_config()
+    anthropic_key = resolve_anthropic_key(config)
+    if not anthropic_key:
+        raise HTTPException(400, "No Anthropic API key configured.")
+
+    out_root = Path(get_output_dir(config))
+    rec_dir = out_root / date
+    transcript_path = rec_dir / f"{timestamp}_transcript.txt"
+    if not transcript_path.exists():
+        raise HTTPException(404, "Transcript not found. Process this recording first.")
+
+    transcript = transcript_path.read_text(encoding="utf-8")
+
+    # Get enabled analyses from config
+    enabled_str = get(config, "analysis", "enabled", default="summary,entities")
+    enabled = [t.strip() for t in enabled_str.split(",") if t.strip()]
+    # Remove "summary" — it's handled separately
+    analysis_types = [t for t in enabled if t != "summary"]
+
+    from pocket_libre.analyze import run_analyses, save_analyses
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None,
+        lambda: run_analyses(transcript, anthropic_key, analysis_types),
+    )
+
+    if results:
+        save_analyses(results, rec_dir, timestamp)
+
+    return {"analyses": list(results.keys()), "count": len(results)}
 
 
 # ── Helpers ─────────────────────────────────────
