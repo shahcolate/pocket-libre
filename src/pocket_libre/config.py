@@ -28,6 +28,10 @@ DEFAULTS = {
         "whisper_model": "base.en",
         "summary_style": "meeting",
     },
+    "analysis": {
+        "enabled": "summary,entities",
+        "custom_prompts": "",
+    },
 }
 
 

@@ -99,9 +99,10 @@ def setup(ctx):
     # Step 2: API keys
     console.print("\n[bold cyan]Step 2: API Keys[/bold cyan]")
 
-    console.print("\n  [bold]Anthropic API Key[/bold] (for AI summaries)")
+    console.print("\n  [bold]Anthropic API Key[/bold] (for AI summaries, mind maps, entity extraction)")
     console.print("  [dim]Get one at: https://console.anthropic.com/settings/keys[/dim]")
-    console.print("  [dim]Cost: ~$0.001 per recording summary[/dim]")
+    console.print("  [dim]Cost: ~$0.003 per recording (summary + entities + mind map)[/dim]")
+    console.print("  [dim]Transcription works without this key (runs locally).[/dim]")
     existing_key = new_config["api"].get("anthropic_key", "")
     masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else ""
     anthropic_key = click.prompt("  Anthropic API key", default=masked or "", show_default=bool(masked))
@@ -165,11 +166,12 @@ def setup(ctx):
 
     console.print(Panel(
         "[bold green]Setup complete![/bold green]\n\n"
-        "Next steps:\n"
-        "  [bold]pocket-libre web[/bold]        Open the web interface\n"
-        "  [bold]pocket-libre status[/bold]      Check device status\n"
-        "  [bold]pocket-libre list[/bold]        List recordings on device\n"
-        "  [bold]pocket-libre download-all[/bold] Download all recordings",
+        "Get started:\n"
+        "  [bold]pocket-libre web[/bold]     Open the web interface (recommended)\n"
+        "  [bold]pocket-libre sync[/bold]    Download + transcribe + summarize all recordings\n\n"
+        "Other commands:\n"
+        "  [bold]pocket-libre status[/bold]  Check device battery & storage\n"
+        "  [bold]pocket-libre list[/bold]    List recordings on device",
         border_style="green",
     ))
 
@@ -544,8 +546,8 @@ def download_all(ctx, address: str | None, session_key: str | None,
 
 @cli.command()
 @click.option("--address", default=None, help="BLE address of your Pocket device.")
-@click.option("--duration", default=60, help="Capture window in seconds.")
 @click.option("--output-dir", default=None, help="Where to save recordings.")
+@click.option("--since", default=None, help="Only sync recordings after this date (YYYY-MM-DD).")
 @click.option("--whisper-model", default=None,
               type=click.Choice(["tiny.en", "base.en", "small.en", "medium.en", "large"]),
               help="Whisper model size.")
@@ -554,55 +556,151 @@ def download_all(ctx, address: str | None, session_key: str | None,
               help="Summary style.")
 @click.option("--anthropic-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY).")
 @click.option("--hf-token", default=None, help="HuggingFace token for speaker diarization.")
-@click.option("--skip-summary", is_flag=True, help="Skip AI summary, just transcribe.")
+@click.option("--skip-process", is_flag=True, help="Only download, skip transcription and summary.")
 @click.option("--prompt", default=None, help="Custom summary prompt (use {transcript} placeholder).")
 @click.pass_context
-def sync(ctx, address: str | None, duration: int, output_dir: str | None,
+def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
          whisper_model: str | None, style: str | None,
          anthropic_key: str | None, hf_token: str | None,
-         skip_summary: bool, prompt: str | None):
-    """One-command sync: capture, transcribe, identify speakers, summarize.
+         skip_process: bool, prompt: str | None):
+    """Sync all new recordings: download, transcribe, summarize.
 
     \b
-    Connects to your Pocket, captures audio, runs Whisper locally,
-    identifies speakers (if pyannote is installed), and summarizes
-    using Claude Haiku (~$0.001 per recording).
+    Downloads all new recordings from the device over BLE, then
+    transcribes with Whisper (locally) and summarizes with Claude Haiku
+    (~$0.001 per recording). Skips recordings already on disk.
     """
+    from pocket_libre.commands import download_with_retry
+
     config = ctx.obj["config"]
     address = _require_address(address, config)
-    out_dir = get_output_dir(config, output_dir)
+    out_root = Path(get_output_dir(config, output_dir))
     whisper_model = whisper_model or get(config, "defaults", "whisper_model", default="base.en")
     style = style or get(config, "defaults", "summary_style", default="meeting")
     anthropic_key = resolve_anthropic_key(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
+    session_key = resolve_session_key(config)
 
-    if not anthropic_key and not skip_summary:
+    if not anthropic_key and not skip_process:
         console.print(Panel(
             "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
-            "To enable AI summaries:\n"
-            "  1. Get a key at https://console.anthropic.com/settings/keys\n"
-            "  2. Run: [bold]pocket-libre setup[/bold]\n"
-            "  OR pass: --anthropic-key sk-ant-...\n"
-            "  OR set:  export ANTHROPIC_API_KEY=sk-ant-...\n\n"
-            "Transcription still works without it (runs locally).",
+            "Transcription works without it (runs locally).\n"
+            "To enable AI summaries (~$0.001/recording):\n"
+            "  pocket-libre setup\n"
+            "  OR set: export ANTHROPIC_API_KEY=sk-ant-...\n\n"
+            "Use --skip-process to just download.",
             title="API Key Missing",
             border_style="yellow",
         ))
 
-    from pocket_libre.pipeline import run_sync
-    asyncio.run(
-        run_sync(
-            address=address,
-            duration=duration,
-            output_dir=out_dir,
-            whisper_model=whisper_model,
-            summary_style=style,
-            hf_token=hf_token,
-            anthropic_key=anthropic_key,
-            skip_summary=skip_summary,
-            custom_prompt=prompt,
-        )
-    )
+    async def _run():
+        # List recordings on device
+        console.print("[bold]Connecting to device...[/bold]")
+        async with PocketCommander(address) as cmd:
+            if not await cmd.authenticate(session_key):
+                console.print("[red]Auth failed.[/red]")
+                return
+            all_recs = await cmd.list_all_recordings()
+
+        if since:
+            all_recs = [r for r in all_recs if r.date >= since]
+
+        if not all_recs:
+            console.print("[yellow]No recordings found.[/yellow]")
+            return
+
+        # Filter to new recordings
+        new_recs = []
+        for rec in all_recs:
+            mp3_path = out_root / rec.date / f"{rec.timestamp}.mp3"
+            if not mp3_path.exists():
+                new_recs.append(rec)
+
+        if not new_recs:
+            console.print(f"[green]All {len(all_recs)} recordings already synced.[/green]")
+            return
+
+        console.print(f"[bold]{len(new_recs)} new recording(s) to sync[/bold] ({len(all_recs)} total on device)\n")
+
+        # Download each
+        for i, rec in enumerate(new_recs, 1):
+            rec_dir = out_root / rec.date
+            rec_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = rec_dir / f"{rec.timestamp}.mp3"
+
+            console.print(f"[bold][{i}/{len(new_recs)}] Downloading {rec}...[/bold]")
+
+            def progress(current, total):
+                if total > 0:
+                    pct = 100 * current // total
+                    console.print(f"\r  [dim]{pct}%[/dim]", end="")
+
+            data = await download_with_retry(address, session_key, rec, progress_callback=progress)
+            console.print()
+
+            if not data:
+                console.print(f"  [red]Failed to download.[/red]")
+                continue
+
+            audio_path.write_bytes(data)
+            console.print(f"  [green]Saved {len(data):,} bytes[/green]")
+
+            if skip_process:
+                continue
+
+            # Transcribe
+            console.print(f"  [dim]Transcribing ({whisper_model})...[/dim]")
+            try:
+                import whisper
+                model = whisper.load_model(whisper_model)
+                result = model.transcribe(str(audio_path), verbose=False)
+                segments = result.get("segments", [])
+            except Exception as e:
+                console.print(f"  [red]Transcription failed: {e}[/red]")
+                continue
+
+            # Diarize
+            try:
+                from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
+                speaker_segments = diarize_auto(
+                    segments, audio_path=str(audio_path),
+                    hf_token=hf_token, anthropic_key=anthropic_key,
+                )
+                labeled = merge_transcript_with_speakers(segments, speaker_segments)
+            except Exception:
+                labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
+
+            from pocket_libre.summarize import format_transcript_for_summary
+            transcript_text = format_transcript_for_summary(labeled)
+            transcript_path = rec_dir / f"{rec.timestamp}_transcript.txt"
+            transcript_path.write_text(transcript_text, encoding="utf-8")
+            console.print(f"  [green]Transcript saved ({len(segments)} segments)[/green]")
+
+            # Summarize
+            if anthropic_key:
+                console.print(f"  [dim]Summarizing...[/dim]")
+                try:
+                    from pocket_libre.summarize import summarize_transcript
+                    summary = summarize_transcript(
+                        transcript_text=transcript_text,
+                        api_key=anthropic_key,
+                        style=style,
+                        custom_prompt=prompt,
+                    )
+                    if summary:
+                        from datetime import datetime
+                        summary_path = rec_dir / f"{rec.timestamp}_summary.md"
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        full_doc = f"# {rec.timestamp} ({ts})\n\n{summary}\n\n---\n\n## Full Transcript\n\n{transcript_text}"
+                        summary_path.write_text(full_doc, encoding="utf-8")
+                        console.print(f"  [green]Summary saved[/green]")
+                except Exception as e:
+                    console.print(f"  [yellow]Summary failed: {e}[/yellow]")
+
+        console.print(f"\n[bold green]Sync complete! {len(new_recs)} recording(s) processed.[/bold green]")
+        console.print(f"[dim]Output: {out_root}[/dim]")
+
+    asyncio.run(_run())
 
 
 @cli.command()
@@ -664,22 +762,12 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
 
     # Diarize
     console.print("\n[bold cyan]Step 2/3: Identifying speakers...[/bold cyan]\n")
-    from pocket_libre.diarize import (
-        diarize_pyannote, diarize_simple, merge_transcript_with_speakers,
+    from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
+
+    speaker_segments = diarize_auto(
+        segments, audio_path=str(input_file),
+        hf_token=hf_token, anthropic_key=anthropic_key,
     )
-
-    speaker_segments = []
-    if hf_token:
-        try:
-            speaker_segments = diarize_pyannote(str(input_file), hf_token)
-        except Exception as e:
-            console.print(f"[yellow]Diarization failed: {e}[/yellow]")
-
-    if not speaker_segments:
-        speaker_segments = diarize_simple(segments)
-        if not hf_token:
-            console.print("[dim]No HuggingFace token. Using basic segmentation.[/dim]")
-
     labeled = merge_transcript_with_speakers(segments, speaker_segments)
 
     from pocket_libre.summarize import format_transcript_for_summary
@@ -730,111 +818,31 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
     console.print(f"\n[bold green]Done![/bold green]")
 
 
-# ── WiFi Transfer ───────────────────────────────
+# ── WiFi commands removed — BLE-only now ────────
+# WiFi discovery/transfer code deleted. Use BLE sync instead.
 
 
-@cli.command("wifi-transfer")
-@click.option("--address", default=None, help="BLE address of your Pocket device.")
-@click.option("--key", "session_key", default=None, help="Session key.")
-@click.option("--date", required=True, help="Recording date (YYYY-MM-DD).")
-@click.option("--timestamp", required=True, help="Recording timestamp (YYYYMMDDHHmmss).")
-@click.option("--output", default=None, help="Output file path.")
+WIFI_REMOVED_MSG = """WiFi transfer has been removed. Use BLE sync instead:
+
+  pocket-libre sync          Download + process all new recordings
+  pocket-libre download-all  Download only
+  pocket-libre web           Use the web interface
+
+BLE is slower but reliable. WiFi may return in a future release."""
+
+
+@cli.command("wifi-discover", hidden=True)
 @click.pass_context
-def wifi_transfer(ctx, address: str | None, session_key: str | None,
-                  date: str, timestamp: str, output: str | None):
-    """Download a recording over WiFi (much faster than BLE).
+def wifi_discover_removed(ctx):
+    """(Removed) WiFi endpoint discovery."""
+    console.print(WIFI_REMOVED_MSG)
 
-    \b
-    Triggers the Pocket to create a WiFi access point,
-    then downloads the recording over HTTP.
-    """
-    config = ctx.obj["config"]
-    address = _require_address(address, config)
-    session_key = resolve_session_key(config, session_key)
 
-    async def _run():
-        async with PocketCommander(address) as cmd:
-            console.print("[dim]Authenticating...[/dim]")
-            if not await cmd.authenticate(session_key):
-                console.print("[red]Auth failed.[/red]")
-                return
-
-            rec = Recording(date=date, timestamp=timestamp, size_kb=0)
-
-            # Step 1: Get WiFi credentials
-            console.print("\n[bold cyan]Step 1: Getting WiFi credentials...[/bold cyan]")
-            await cmd.wifi_start()
-            creds = await cmd.wifi_get_credentials()
-            if not creds:
-                console.print("[red]Failed to get WiFi credentials.[/red]")
-                return
-
-            ssid, password = creds
-            console.print(f"\n[bold yellow]Connect to this WiFi network:[/bold yellow]")
-            console.print(f"  SSID:     [bold]{ssid}[/bold]")
-            console.print(f"  Password: [bold]{password}[/bold]")
-
-            # Step 2: Wait for WiFi to be ready
-            console.print("\n[bold cyan]Step 2: Waiting for WiFi AP...[/bold cyan]")
-            ready = await cmd.wifi_wait_ready(timeout=60)
-            if not ready:
-                console.print("[red]WiFi AP did not become ready.[/red]")
-                await cmd.wifi_cleanup()
-                return
-
-            console.print("[green]WiFi AP is ready![/green]")
-
-            # Step 3: Select file and start transfer
-            console.print(f"\n[bold cyan]Step 3: Requesting {rec.timestamp}...[/bold cyan]")
-            file_size = await cmd.wifi_select_file(rec)
-            console.print(f"[dim]File size: {file_size:,} bytes[/dim]")
-
-            transfer_size = await cmd.wifi_begin_transfer()
-            console.print(f"[dim]Transfer confirmed: {transfer_size:,} bytes[/dim]")
-
-            # Step 4: Download over HTTP
-            console.print(f"\n[bold cyan]Step 4: Downloading over WiFi...[/bold cyan]")
-            console.print("[yellow]Make sure you're connected to the Pocket WiFi network![/yellow]")
-
-            import urllib.request
-            import urllib.error
-
-            downloaded = False
-            for base_url in ["http://192.168.4.1", "http://192.168.1.1", "http://10.0.0.1"]:
-                for endpoint in [
-                    f"/{rec.date}/{rec.timestamp}.mp3",
-                    f"/recording.mp3", f"/download", f"/",
-                ]:
-                    url = base_url + endpoint
-                    try:
-                        console.print(f"[dim]Trying {url}...[/dim]")
-                        req = urllib.request.Request(url)
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            data = resp.read()
-                            if len(data) > 1000:
-                                out_path = Path(output) if output else Path(f"{timestamp}.mp3")
-                                out_path.write_bytes(data)
-                                console.print(f"\n[bold green]Downloaded {len(data):,} bytes to {out_path}[/bold green]")
-                                downloaded = True
-                                break
-                    except (urllib.error.URLError, OSError):
-                        continue
-                if downloaded:
-                    break
-
-            if not downloaded:
-                console.print(
-                    "\n[yellow]Could not auto-discover HTTP endpoint.[/yellow]\n"
-                    "The WiFi AP is active. Try manually:\n"
-                    f"  curl http://192.168.4.1/\n"
-                    f"  nmap -sV -p 1-65535 192.168.4.1"
-                )
-
-            console.print("\n[dim]Cleaning up WiFi...[/dim]")
-            await cmd.wifi_cleanup()
-            console.print("[green]Done![/green]")
-
-    asyncio.run(_run())
+@cli.command("wifi-transfer", hidden=True)
+@click.pass_context
+def wifi_transfer_removed(ctx):
+    """(Removed) WiFi file transfer."""
+    console.print(WIFI_REMOVED_MSG)
 
 
 # ── Web Interface ───────────────────────────────

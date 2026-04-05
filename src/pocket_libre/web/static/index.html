@@ -73,6 +73,14 @@ tr:hover td { background: var(--bg3); }
 .recording-detail.open { display: block; }
 .recording-detail audio { width: 100%; margin: 0.5rem 0; }
 .recording-detail pre { white-space: pre-wrap; font-size: 0.8rem; max-height: 300px; overflow-y: auto; padding: 0.75rem; background: var(--bg); border-radius: 4px; margin: 0.5rem 0; }
+.transcript-full { background: var(--bg); border-radius: 6px; padding: 1rem; margin: 0.5rem 0; max-height: 70vh; overflow-y: auto; }
+.transcript-full .t-line { padding: 0.35rem 0; border-bottom: 1px solid var(--border); display: flex; gap: 0.75rem; font-size: 0.85rem; line-height: 1.5; }
+.transcript-full .t-line:last-child { border-bottom: none; }
+.transcript-full .t-ts { color: var(--dim); font-size: 0.75rem; flex-shrink: 0; min-width: 3.5rem; padding-top: 0.1rem; font-family: monospace; }
+.transcript-full .t-spk { color: var(--accent); font-weight: 600; flex-shrink: 0; min-width: 6rem; font-size: 0.8rem; padding-top: 0.05rem; }
+.transcript-full .t-txt { color: var(--fg); flex: 1; }
+.transcript-toggle { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 0.8rem; margin-left: 0.5rem; }
+.transcript-toggle:hover { color: var(--accent); }
 .recording-detail .summary { line-height: 1.6; font-size: 0.85rem; }
 .recording-detail .summary h1, .recording-detail .summary h2, .recording-detail .summary h3 { color: var(--accent); margin: 0.75rem 0 0.3rem; }
 .recording-detail .summary ul { padding-left: 1.5rem; }
@@ -85,6 +93,36 @@ tr:hover td { background: var(--bg3); }
 .step-list li.error { color: var(--red); }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.pill { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin: 0.15rem; }
+.pill.people { background: rgba(122,162,247,0.2); color: var(--accent); }
+.pill.topic { background: rgba(158,206,106,0.15); color: var(--green); border: 1px solid rgba(158,206,106,0.3); }
+.pill.action { background: rgba(224,175,104,0.15); color: var(--yellow); }
+.pill.decision { background: rgba(125,207,255,0.15); color: var(--cyan); }
+.pill.date { background: rgba(247,118,142,0.15); color: var(--red); }
+
+.mind-map { padding: 0.5rem 0; }
+.mind-map .branch { margin: 0.5rem 0 0.5rem 1rem; }
+.mind-map .branch-label { font-weight: 600; color: var(--accent); cursor: pointer; user-select: none; }
+.mind-map .branch-label:before { content: "▸ "; font-size: 0.8em; }
+.mind-map .branch-label.open:before { content: "▾ "; }
+.mind-map .leaves { display: none; margin: 0.25rem 0 0 1.25rem; }
+.mind-map .leaves.open { display: block; }
+.mind-map .leaf { padding: 0.15rem 0; color: var(--fg2); font-size: 0.85rem; }
+.mind-map .leaf:before { content: "• "; color: var(--dim); }
+
+.chat-box { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.chat-box h4 { color: var(--accent); margin-bottom: 0.5rem; }
+.chat-messages { max-height: 200px; overflow-y: auto; margin-bottom: 0.5rem; }
+.chat-msg { padding: 0.4rem 0; font-size: 0.85rem; }
+.chat-msg.user { color: var(--dim); }
+.chat-msg.ai { color: var(--fg); margin-bottom: 0.5rem; }
+.chat-input { display: flex; gap: 0.5rem; }
+.chat-input input { flex: 1; padding: 0.4rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.85rem; }
+.chat-input input:focus { outline: none; border-color: var(--accent); }
+
+.entity-section { margin: 0.5rem 0; }
+.entity-section h5 { font-size: 0.8rem; color: var(--dim); margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px; }
 </style>
 </head>
 <body>
@@ -118,10 +156,17 @@ tr:hover td { background: var(--bg3); }
     <div class="card">
       <h3>Quick Actions</h3>
       <div class="btn-group">
+        <button class="btn primary" onclick="startSyncAll()" id="syncAllBtn">Sync All New Recordings</button>
         <button class="btn" onclick="switchTab('device'); fetchDeviceRecordings()">View Device Recordings</button>
         <button class="btn" onclick="switchTab('library'); fetchLocalRecordings()">View Library</button>
         <button class="btn" onclick="switchTab('settings')">Settings</button>
       </div>
+    </div>
+    <div class="card" id="syncCard" style="display:none">
+      <h3>Sync Progress</h3>
+      <div id="syncOverall" style="margin-bottom:0.5rem; color:var(--dim)"></div>
+      <ul class="step-list" id="syncStepList"></ul>
+      <div class="progress-bar"><div class="fill" id="syncProgress" style="width:0%"></div></div>
     </div>
   </div>
 
@@ -132,8 +177,9 @@ tr:hover td { background: var(--bg3); }
       <div id="deviceRecordings">
         <div class="empty">Click "Load Recordings" to see what's on your Pocket.</div>
       </div>
-      <div class="btn-group">
-        <button class="btn primary" onclick="fetchDeviceRecordings()">Load Recordings</button>
+      <div class="btn-group" id="deviceBtnGroup">
+        <button class="btn primary" onclick="fetchDeviceRecordings()" id="btnLoadRecs">Load Recordings</button>
+        <button class="btn" onclick="startSyncAll()" id="btnSyncAll">Sync All New</button>
       </div>
     </div>
     <div class="card" id="processCard" style="display:none">
@@ -147,6 +193,9 @@ tr:hover td { background: var(--bg3); }
   <div class="panel" id="library">
     <div class="card">
       <h3>Processed Recordings</h3>
+      <div style="margin-bottom:1rem">
+        <input type="text" id="librarySearch" placeholder="Search recordings..." oninput="filterLibrary()" style="width:100%;padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:0.9rem;">
+      </div>
       <div id="localRecordings">
         <div class="empty">No recordings yet. Download and process recordings from the Device tab.</div>
       </div>
@@ -162,8 +211,12 @@ tr:hover td { background: var(--bg3); }
       <h3>Device</h3>
       <div class="form-group">
         <label>Device Address</label>
-        <input type="text" id="cfgAddress" placeholder="YOUR-DEVICE-ADDRESS">
-        <div class="hint">BLE address of your Pocket. Run <code>pocket-libre scan --filter pkt</code> to find it.</div>
+        <div style="display:flex;gap:0.5rem">
+          <input type="text" id="cfgAddress" placeholder="YOUR-DEVICE-ADDRESS" style="flex:1">
+          <button class="btn" onclick="scanForDevice()" id="scanBtn">Scan</button>
+        </div>
+        <div class="hint">BLE address of your Pocket. Click "Scan" to auto-detect.</div>
+        <div id="scanResults" style="margin-top:0.5rem"></div>
       </div>
       <div class="form-group">
         <label>Session Key</label>
@@ -308,6 +361,76 @@ async function fetchDeviceRecordings() {
 function startDownload(date, ts) { runSSE(`/api/download/${date}/${ts}`); }
 function startProcess(date, ts) { runSSE(`/api/process/${date}/${ts}`); }
 
+function setDeviceBusy(busy) {
+  const ids = ['btnLoadRecs', 'btnSyncAll', 'syncAllBtn'];
+  ids.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = busy; });
+}
+
+function startSyncAll() {
+  const card = document.getElementById('syncCard');
+  const stepList = document.getElementById('syncStepList');
+  const progressBar = document.getElementById('syncProgress');
+  const overall = document.getElementById('syncOverall');
+  const btn = document.getElementById('syncAllBtn');
+  card.style.display = 'block';
+  stepList.innerHTML = '';
+  progressBar.style.width = '0%';
+  overall.textContent = 'Starting sync...';
+  setDeviceBusy(true);
+
+  // Switch to dashboard to show progress
+  switchTab('dashboard');
+
+  const steps = {};
+  const source = new EventSource('/api/sync-all');
+
+  source.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+
+    if (data.step === 'error') {
+      addStep(steps, stepList, 'error', data.message, 'error');
+      toast(data.message, 'error');
+      // Don't close — more recordings may follow
+      return;
+    }
+
+    if (data.step === 'complete') {
+      source.close();
+      overall.textContent = data.message;
+      progressBar.style.width = '100%';
+      addStep(steps, stepList, 'complete', data.message, 'done');
+      toast(data.message, 'success');
+      setDeviceBusy(false);
+      fetchLocalRecordings();
+      return;
+    }
+
+    if (data.step === 'scan') {
+      overall.textContent = data.message;
+      addStep(steps, stepList, 'scan', data.message, 'active');
+      return;
+    }
+
+    // Multi-recording progress
+    if (data.recording && data.total) {
+      overall.textContent = `Recording ${data.recording} of ${data.total}: ${data.step}`;
+      // Overall progress: (completed recordings + current progress) / total
+      const overallPct = Math.round(((data.recording - 1) + (data.progress || 0) / 100) / data.total * 100);
+      progressBar.style.width = overallPct + '%';
+    }
+
+    const key = data.recording ? `${data.step}-${data.recording}` : data.step;
+    const msg = data.message || (data.progress !== undefined ? `${data.progress}%` : '...');
+    addStep(steps, stepList, key, `[${data.recording || ''}/${data.total || ''}] ${data.step}: ${msg}`, 'active');
+  };
+
+  source.onerror = () => {
+    source.close();
+    setDeviceBusy(false);
+    toast('Sync connection lost', 'error');
+  };
+}
+
 function runSSE(url) {
   const card = document.getElementById('processCard');
   const stepList = document.getElementById('stepList');
@@ -388,9 +511,12 @@ async function fetchLocalRecordings() {
       const badges = [];
       if (rec.has_transcript) badges.push('<span style="color:var(--green)">transcript</span>');
       if (rec.has_summary) badges.push('<span style="color:var(--cyan)">summary</span>');
+      if (rec.has_entities) badges.push('<span style="color:var(--yellow)">entities</span>');
+      if (rec.has_mind_map) badges.push('<span style="color:var(--accent)">mind map</span>');
+      if (!rec.has_transcript && rec.size_bytes > 0) badges.push('<span style="color:var(--red)">new</span>');
 
       html += `
-        <div class="card" style="cursor:pointer" onclick="toggleDetail(this, '${rec.date}', '${rec.timestamp}')">
+        <div class="card library-card" data-date="${rec.date}" data-ts="${rec.timestamp}" style="cursor:pointer" onclick="toggleDetail(this, '${rec.date}', '${rec.timestamp}')">
           <div style="display:flex; justify-content:space-between; align-items:center">
             <div>
               <strong>${rec.date} / ${rec.timestamp}</strong>
@@ -417,26 +543,228 @@ async function toggleDetail(card, date, ts) {
 
   let html = `<audio controls src="/api/local/${date}/${ts}/audio"></audio>`;
 
-  try {
-    const tr = await fetch(`/api/local/${date}/${ts}/transcript`);
-    if (tr.ok) {
-      const text = await tr.text();
-      html += `<h4 style="color:var(--accent);margin:0.5rem 0">Transcript</h4><pre>${escapeHtml(text)}</pre>`;
-    }
-  } catch {}
+  // Fetch analyses, transcript, and summary in parallel
+  const [analysesResp, transcriptResp, summaryResp] = await Promise.allSettled([
+    fetch(`/api/local/${date}/${ts}/analyses`).then(r => r.ok ? r.json() : null),
+    fetch(`/api/local/${date}/${ts}/transcript`).then(r => r.ok ? r.text() : null),
+    fetch(`/api/local/${date}/${ts}/summary`).then(r => r.ok ? r.text() : null),
+  ]);
 
-  try {
-    const sr = await fetch(`/api/local/${date}/${ts}/summary`);
-    if (sr.ok) {
-      const md = await sr.text();
-      html += `<h4 style="color:var(--accent);margin:0.5rem 0">Summary</h4><div class="summary">${renderMarkdown(md)}</div>`;
+  const analyses = analysesResp.status === 'fulfilled' ? analysesResp.value : null;
+  const transcript = transcriptResp.status === 'fulfilled' ? transcriptResp.value : null;
+  const summary = summaryResp.status === 'fulfilled' ? summaryResp.value : null;
+
+  // Mind Map
+  if (analyses?.mind_map && analyses.mind_map.branches) {
+    html += renderMindMap(analyses.mind_map);
+  }
+
+  // Entities
+  if (analyses?.entities) {
+    html += renderEntities(analyses.entities);
+  }
+
+  // Summary
+  if (summary) {
+    html += `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">Summary</h4><div class="summary">${renderMarkdown(summary)}</div>`;
+  }
+
+  // Key Quotes
+  if (analyses?.key_quotes?.quotes) {
+    html += `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">Key Quotes</h4>`;
+    for (const q of analyses.key_quotes.quotes) {
+      html += `<div style="margin:0.4rem 0;padding:0.4rem 0.75rem;border-left:3px solid var(--accent);font-size:0.85rem">
+        <em>"${escapeHtml(q.quote)}"</em>
+        <span style="color:var(--dim)"> — ${escapeHtml(q.speaker)} [${q.timestamp || ''}]</span>
+        ${q.context ? `<div style="color:var(--dim);font-size:0.8rem;margin-top:0.2rem">${escapeHtml(q.context)}</div>` : ''}
+      </div>`;
     }
-  } catch {}
+  }
+
+  // Custom analyses
+  if (analyses) {
+    for (const [key, val] of Object.entries(analyses)) {
+      if (['mind_map', 'entities', 'key_quotes'].includes(key)) continue;
+      if (key.startsWith('custom_')) {
+        const name = key.replace('custom_', '');
+        html += `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">${escapeHtml(name)}</h4>`;
+        html += `<div class="summary">${renderMarkdown(String(val))}</div>`;
+      }
+    }
+  }
+
+  // Transcript
+  if (transcript) {
+    html += renderTranscript(transcript);
+  }
+
+  // Run Analysis button (if transcript exists but no analyses)
+  if (transcript && !analyses) {
+    html += `<div class="btn-group"><button class="btn" onclick="runAnalysis('${date}','${ts}',this)">Run AI Analysis</button></div>`;
+  }
+
+  // Chat
+  if (transcript) {
+    html += `
+      <div class="chat-box">
+        <h4>Ask about this recording</h4>
+        <div class="chat-messages" id="chat-${date}-${ts}"></div>
+        <div class="chat-input">
+          <input type="text" placeholder="What action items were mentioned?" id="chatInput-${date}-${ts}"
+            onkeydown="if(event.key==='Enter')sendChat('${date}','${ts}')">
+          <button class="btn primary" onclick="sendChat('${date}','${ts}')">Ask</button>
+        </div>
+      </div>`;
+  }
 
   detail.innerHTML = html;
 }
 
+function renderMindMap(data) {
+  let html = `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">Mind Map: ${escapeHtml(data.topic || '')}</h4><div class="mind-map">`;
+  for (const branch of (data.branches || [])) {
+    const id = 'mm-' + Math.random().toString(36).slice(2, 8);
+    html += `<div class="branch">
+      <div class="branch-label" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">${escapeHtml(branch.label)}</div>
+      <div class="leaves">`;
+    for (const leaf of (branch.children || [])) {
+      html += `<div class="leaf">${escapeHtml(typeof leaf === 'string' ? leaf : leaf.label || JSON.stringify(leaf))}</div>`;
+    }
+    html += `</div></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderEntities(data) {
+  let html = '';
+  const sections = [
+    { key: 'people', label: 'People', cls: 'people' },
+    { key: 'topics', label: 'Topics', cls: 'topic' },
+    { key: 'action_items', label: 'Action Items', cls: 'action' },
+    { key: 'decisions', label: 'Decisions', cls: 'decision' },
+    { key: 'dates', label: 'Dates & Deadlines', cls: 'date' },
+    { key: 'organizations', label: 'Organizations', cls: 'people' },
+  ];
+
+  let hasSomething = false;
+  let pillsHtml = '';
+  for (const sec of sections) {
+    const items = data[sec.key];
+    if (!items || items.length === 0) continue;
+    hasSomething = true;
+    pillsHtml += `<div class="entity-section"><h5>${sec.label}</h5>`;
+    for (const item of items) {
+      const text = typeof item === 'string' ? item : (item.task ? `${item.owner}: ${item.task}` : JSON.stringify(item));
+      pillsHtml += `<span class="pill ${sec.cls}">${escapeHtml(text)}</span>`;
+    }
+    pillsHtml += '</div>';
+  }
+
+  if (hasSomething) {
+    html += `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">Entities</h4>${pillsHtml}`;
+  }
+  return html;
+}
+
+async function sendChat(date, ts) {
+  const input = document.getElementById(`chatInput-${date}-${ts}`);
+  const messages = document.getElementById(`chat-${date}-${ts}`);
+  const question = input.value.trim();
+  if (!question) return;
+
+  input.value = '';
+  messages.innerHTML += `<div class="chat-msg user"><strong>You:</strong> ${escapeHtml(question)}</div>`;
+  messages.innerHTML += `<div class="chat-msg ai" id="chatPending-${date}-${ts}"><span class="spinner"></span> Thinking...</div>`;
+  messages.scrollTop = messages.scrollHeight;
+
+  try {
+    const r = await fetch(`/api/chat/${date}/${ts}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: question }),
+    });
+    const data = await r.json();
+    const pending = document.getElementById(`chatPending-${date}-${ts}`);
+    if (pending) {
+      pending.id = '';
+      pending.innerHTML = `<strong>AI:</strong> ${renderMarkdown(data.response || data.detail || 'No response')}`;
+    }
+  } catch (e) {
+    const pending = document.getElementById(`chatPending-${date}-${ts}`);
+    if (pending) {
+      pending.id = '';
+      pending.className = 'chat-msg error';
+      pending.textContent = `Error: ${e.message}`;
+    }
+  }
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function runAnalysis(date, ts, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Analyzing...';
+  try {
+    const r = await fetch(`/api/analyze/${date}/${ts}`, { method: 'POST' });
+    if (r.ok) {
+      toast('Analysis complete!', 'success');
+      // Re-open the detail to show new data
+      const detail = document.getElementById(`detail-${date}-${ts}`);
+      detail.classList.remove('open');
+      detail.parentElement.click();
+    } else {
+      const err = await r.json();
+      toast(err.detail || 'Analysis failed', 'error');
+      btn.disabled = false;
+      btn.textContent = 'Run AI Analysis';
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Run AI Analysis';
+  }
+}
+
+function filterLibrary() {
+  const query = document.getElementById('librarySearch').value.toLowerCase();
+  document.querySelectorAll('.library-card').forEach(card => {
+    const date = card.dataset.date || '';
+    const ts = card.dataset.ts || '';
+    const text = card.textContent.toLowerCase();
+    card.style.display = (text.includes(query) || date.includes(query) || ts.includes(query)) ? '' : 'none';
+  });
+}
+
 function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function renderTranscript(raw) {
+  // Parse lines like: [00:15] Speaker 1: Some text here
+  const lines = raw.split('\n').filter(l => l.trim());
+  const parsed = lines.map(l => {
+    const m = l.match(/^\[(\d{2}:\d{2})\]\s*([^:]+):\s*(.+)$/);
+    if (m) return { ts: m[1], speaker: m[2].trim(), text: m[3].trim() };
+    return { ts: '', speaker: '', text: l.trim() };
+  });
+
+  // Assign colors per speaker
+  const speakers = [...new Set(parsed.map(p => p.speaker).filter(Boolean))];
+  const colors = ['var(--accent)', 'var(--green)', 'var(--yellow)', 'var(--cyan)', 'var(--red)'];
+  const colorMap = {};
+  speakers.forEach((s, i) => colorMap[s] = colors[i % colors.length]);
+
+  let rows = parsed.map(p =>
+    `<div class="t-line">` +
+    `<span class="t-ts">${escapeHtml(p.ts)}</span>` +
+    `<span class="t-spk" style="color:${colorMap[p.speaker] || 'var(--accent)'}">${escapeHtml(p.speaker)}</span>` +
+    `<span class="t-txt">${escapeHtml(p.text)}</span>` +
+    `</div>`
+  ).join('');
+
+  const id = 'tr-' + Math.random().toString(36).slice(2, 8);
+  return `<h4 style="color:var(--accent);margin:0.75rem 0 0.3rem">Transcript (${lines.length} segments)` +
+    `<button class="transcript-toggle" onclick="let el=document.getElementById('${id}');el.style.maxHeight=el.style.maxHeight==='none'?'70vh':'none';this.textContent=el.style.maxHeight==='none'?'collapse':'expand all'">expand all</button></h4>` +
+    `<div class="transcript-full" id="${id}">${rows}</div>`;
+}
 
 function renderMarkdown(md) {
   // Simple markdown renderer
@@ -456,6 +784,7 @@ function renderMarkdown(md) {
 async function loadSettings() {
   try {
     const r = await fetch('/api/config');
+    if (!r.ok) return;
     const cfg = await r.json();
 
     document.getElementById('cfgAddress').value = cfg.device?.address || '';
@@ -526,8 +855,49 @@ async function testConnection() {
   }
 }
 
+async function scanForDevice() {
+  const btn = document.getElementById('scanBtn');
+  const results = document.getElementById('scanResults');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  results.innerHTML = '<span class="spinner"></span>';
+
+  try {
+    const r = await fetch('/api/scan');
+    const devices = await r.json();
+    if (devices.length === 0) {
+      results.innerHTML = '<span style="color:var(--dim)">No Pocket devices found. Make sure it\'s awake (press button).</span>';
+    } else {
+      let html = '';
+      for (const d of devices) {
+        html += `<div style="padding:0.3rem 0">
+          <button class="btn" onclick="document.getElementById('cfgAddress').value='${d.address}';document.getElementById('scanResults').innerHTML=''">
+            ${escapeHtml(d.name)} ${d.rssi ? `(${d.rssi} dBm)` : ''}
+          </button>
+          <span style="color:var(--dim);font-size:0.8rem;margin-left:0.5rem">${d.address}</span>
+        </div>`;
+      }
+      results.innerHTML = html;
+    }
+  } catch (e) {
+    results.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Scan';
+}
+
 // Init
-loadSettings();
+loadSettings().then(() => {
+  // First-run: if no device address, show settings with welcome
+  const addr = document.getElementById('cfgAddress').value;
+  if (!addr) {
+    switchTab('settings');
+    toast('Welcome! Set up your device to get started.', 'info');
+  } else {
+    // Auto-connect on load
+    refreshStatus();
+  }
+});
 fetchLocalRecordings();
 </script>
 </body>
