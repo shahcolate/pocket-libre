@@ -57,6 +57,7 @@ class PocketCommander:
         self._response_event = asyncio.Event()
         self._audio_data = bytearray()
         self._audio_event = asyncio.Event()
+        self._disconnected = False
 
     async def __aenter__(self):
         # Scan first to ensure the device is discovered by CoreBluetooth
@@ -69,7 +70,12 @@ class PocketCommander:
                 f"Device {self.address} not found. "
                 "Make sure it's awake (press the button) and nearby."
             )
-        self.client = BleakClient(device, timeout=self.timeout)
+        self._disconnected = False
+        self.client = BleakClient(
+            device,
+            timeout=self.timeout,
+            disconnected_callback=self._on_disconnect,
+        )
         await self.client.connect()
 
         # Subscribe to command responses
@@ -86,6 +92,11 @@ class PocketCommander:
                 pass
             await self.client.disconnect()
 
+    def _on_disconnect(self, client: BleakClient):
+        self._disconnected = True
+        self._response_event.set()
+        self._audio_event.set()
+
     def _on_response(self, sender: int, data: bytearray):
         text = data.decode("ascii", errors="replace")
         self._responses.append(text)
@@ -95,12 +106,14 @@ class PocketCommander:
         self._audio_data.extend(data)
         self._audio_event.set()
 
-    async def _send(self, command: str) -> list[str]:
+    async def _send(self, command: str, verbose: bool = False) -> list[str]:
         """Send an APP& command and collect MCU& responses."""
         self._responses.clear()
         self._response_event.clear()
 
         payload = f"{CMD_PREFIX}{command}".encode("ascii")
+        if verbose:
+            console.print(f"  [cyan]>>> APP&{command}[/cyan]")
         await self.client.write_gatt_char(CMD_WRITE_CHAR, payload, response=False)
 
         # Wait for response(s) — some commands return multiple lines
@@ -112,6 +125,12 @@ class PocketCommander:
                 await asyncio.wait_for(self._response_event.wait(), timeout=0.5)
             except asyncio.TimeoutError:
                 break
+
+        if verbose:
+            for r in self._responses:
+                console.print(f"  [green]<<< {r}[/green]")
+            if not self._responses:
+                console.print(f"  [dim]<<< (no response)[/dim]")
 
         return list(self._responses)
 
@@ -190,6 +209,9 @@ class PocketCommander:
         for d in dirs:
             recs = await self.list_files(d)
             all_recs.extend(recs)
+            # Brief pause between directory listings to avoid overwhelming device MCU
+            if len(dirs) > 1:
+                await asyncio.sleep(0.2)
         return all_recs
 
     # ── BLE File Transfer ────────────────────────
@@ -221,15 +243,18 @@ class PocketCommander:
             console.print(f"[dim]Expected size: {expected_size:,} bytes[/dim]")
 
         # Collect audio data until transfer completes
-        last_size = 0
         stall_count = 0
         while True:
+            if self._disconnected:
+                console.print("[yellow]BLE disconnected during transfer.[/yellow]")
+                break
+
             self._audio_event.clear()
             try:
-                await asyncio.wait_for(self._audio_event.wait(), timeout=3.0)
+                await asyncio.wait_for(self._audio_event.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 stall_count += 1
-                if stall_count >= 3:
+                if stall_count >= 5:
                     break
                 continue
 
@@ -241,8 +266,6 @@ class PocketCommander:
 
             if expected_size > 0 and current_size >= expected_size:
                 break
-
-            last_size = current_size
 
         await self.client.stop_notify(AUDIO_NOTIFY_CHAR)
         return bytes(self._audio_data)
@@ -313,3 +336,60 @@ class PocketCommander:
     async def wifi_cleanup(self):
         """Send WiFi disconnect/cleanup command."""
         await self._send("WIFIC")
+
+
+async def download_with_retry(
+    address: str,
+    session_key: str,
+    recording: Recording,
+    max_retries: int = 3,
+    progress_callback=None,
+) -> bytes:
+    """Download a recording with automatic retry on failure.
+
+    Creates its own BLE connection for each attempt. On disconnect or
+    short data, waits briefly and retries from scratch.
+
+    Returns MP3 bytes (trimmed to sync word) or empty bytes on total failure.
+    """
+    from pocket_libre.protocol import MP3_SYNC_WORD
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                console.print(f"[yellow]Retry {attempt}/{max_retries}...[/yellow]")
+                await asyncio.sleep(3.0)
+
+            async with PocketCommander(address) as cmd:
+                if not await cmd.authenticate(session_key):
+                    console.print("[red]Auth failed.[/red]")
+                    continue
+
+                data = await cmd.download_ble(recording, progress_callback=progress_callback)
+
+                if not data:
+                    console.print("[yellow]No data received.[/yellow]")
+                    continue
+
+                # Trim to MP3 sync word
+                mp3_start = data.find(MP3_SYNC_WORD)
+                if mp3_start > 0:
+                    data = data[mp3_start:]
+
+                # Validate: check we got a reasonable amount of data
+                if recording.size_kb > 0:
+                    expected = recording.size_kb * 1024
+                    if len(data) < expected * 0.5:
+                        console.print(
+                            f"[yellow]Short transfer: {len(data):,} bytes "
+                            f"(expected ~{expected:,})[/yellow]"
+                        )
+                        continue
+
+                return data
+
+        except Exception as e:
+            console.print(f"[yellow]Attempt {attempt} failed: {e}[/yellow]")
+
+    console.print("[red]All retry attempts exhausted.[/red]")
+    return b""

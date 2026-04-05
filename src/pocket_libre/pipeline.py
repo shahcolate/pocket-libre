@@ -99,32 +99,12 @@ async def run_sync(
     # ── Step 3: Speaker diarization ────────────────────────
     console.print("\n[bold cyan]Step 3/4: Identifying speakers...[/bold cyan]\n")
 
-    from pocket_libre.diarize import (
-        diarize_pyannote,
-        diarize_simple,
-        merge_transcript_with_speakers,
+    from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
+
+    speaker_segments = diarize_auto(
+        segments, audio_path=str(audio_path),
+        hf_token=hf_token, anthropic_key=anthropic_key,
     )
-
-    speaker_segments = []
-
-    if hf_token:
-        try:
-            speaker_segments = diarize_pyannote(str(audio_path), hf_token)
-        except Exception as e:
-            console.print(f"[yellow]Diarization failed: {e}[/yellow]")
-            console.print("[dim]Falling back to simple mode.[/dim]")
-
-    if not speaker_segments:
-        speaker_segments = diarize_simple(segments)
-        if not hf_token:
-            console.print(
-                "[dim]No HuggingFace token provided. "
-                "Using basic segmentation (no speaker ID).[/dim]"
-            )
-            console.print(
-                "[dim]For speaker identification, set HUGGINGFACE_TOKEN "
-                "and run: pip install pyannote.audio[/dim]"
-            )
 
     labeled_segments = merge_transcript_with_speakers(segments, speaker_segments)
 
