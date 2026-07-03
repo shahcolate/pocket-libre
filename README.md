@@ -24,6 +24,7 @@ pocket-libre setup
 
 The setup wizard walks you through:
 - Finding your Pocket device (BLE scan)
+- Entering your session key (capture it from the vendor app's `APP&SK&` write — see [PROTOCOL.md](PROTOCOL.md))
 - Entering your API keys (Anthropic for summaries, HuggingFace for speaker ID)
 - Choosing your output directory and preferences
 
@@ -83,7 +84,7 @@ All settings are stored in `~/.pocket-libre/config.toml`:
 ```toml
 [device]
 address = "YOUR-DEVICE-ADDRESS"
-session_key = "xJiEbRKnKrhCqvoZ"
+session_key = "YOUR-SESSION-KEY"
 
 [api]
 anthropic_key = "sk-ant-..."

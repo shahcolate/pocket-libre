@@ -40,10 +40,10 @@ Frame sync word: `0xFFF348C4`. No DRM, no encryption, no proprietary codec.
 ### Session Authentication
 
 ```
->> APP&SK&xJiEbRKnKrhCqvoZ
+>> APP&SK&<16-char-session-key>
 << MCU&SK&OK
 ```
-Session key authenticates the connection. First 8 chars (`xJiEbRKn`) are reused as the WiFi AP password.
+The 16-character session key authenticates the connection. Capture yours by sniffing the vendor app's `APP&SK&` write with PacketLogger (or `pocket-libre sniff`). The first 8 characters are reused as the device's WiFi AP password — treat the key as a secret.
 
 ### Device Info
 
@@ -102,7 +102,7 @@ Complete sequence observed from official app:
 
 # 2. Get WiFi AP credentials
 >> APP&WIFI
-<< MCU&WIFI&PKT01_GREY_XXXXXXXX&xJiEbRKn   # SSID & password
+<< MCU&WIFI&PKT01_GREY_XXXXXXXX&XXXXXXXX   # SSID & password (first 8 chars of session key)
 
 # 3. Turn on WiFi AP
 >> APP&WIFIO

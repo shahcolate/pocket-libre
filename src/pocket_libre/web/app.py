@@ -119,6 +119,8 @@ async def device_status():
     if not address:
         raise HTTPException(400, "No device address configured. Go to Settings.")
     sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
 
     if ble_lock.locked():
         raise HTTPException(409, "Device is busy with another operation.")
@@ -158,6 +160,8 @@ async def device_recordings():
     if not address:
         raise HTTPException(400, "No device address configured.")
     sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
 
     if ble_lock.locked():
         raise HTTPException(409, "Device is busy.")
@@ -195,6 +199,8 @@ async def download_recording(date: str, timestamp: str):
     if not address:
         raise HTTPException(400, "No device address configured.")
     sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
     out_root = Path(get_output_dir(config))
 
     if ble_lock.locked():
@@ -266,6 +272,8 @@ async def process_recording(date: str, timestamp: str):
     if not address:
         raise HTTPException(400, "No device address configured.")
     sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
     out_root = Path(get_output_dir(config))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")
@@ -401,6 +409,8 @@ async def sync_all():
     if not address:
         raise HTTPException(400, "No device address configured.")
     sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
     out_root = Path(get_output_dir(config))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")
