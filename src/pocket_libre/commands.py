@@ -142,6 +142,8 @@ class PocketCommander:
     # ── Device Info ──────────────────────────────
 
     async def authenticate(self, session_key: str) -> bool:
+        if not session_key:
+            raise ValueError("No session key configured.")
         responses = await self._send(f"SK&{session_key}")
         return any("MCU&SK&OK" in r for r in responses)
 

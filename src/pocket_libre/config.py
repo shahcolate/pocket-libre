@@ -100,8 +100,8 @@ def resolve_address(config: dict, cli_value: str | None = None) -> str | None:
     return get(config, "device", "address", cli_value=cli_value)
 
 
-def resolve_session_key(config: dict, cli_value: str | None = None) -> str | None:
-    """Resolve session key from config chain."""
+def resolve_session_key(config: dict, cli_value: str | None = None) -> str:
+    """Resolve session key from config chain. Returns "" when unset."""
     return get(config, "device", "session_key", cli_value=cli_value)
 
 
