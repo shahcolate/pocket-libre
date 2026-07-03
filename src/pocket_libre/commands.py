@@ -142,6 +142,8 @@ class PocketCommander:
     # ── Device Info ──────────────────────────────
 
     async def authenticate(self, session_key: str) -> bool:
+        if not session_key:
+            raise ValueError("No session key configured.")
         responses = await self._send(f"SK&{session_key}")
         return any("MCU&SK&OK" in r for r in responses)
 
@@ -276,7 +278,7 @@ class PocketCommander:
         """Get WiFi AP credentials. Returns (ssid, password) or None."""
         responses = await self._send("WIFI")
         for r in responses:
-            # MCU&WIFI&PKT01_GREY_XXXXXXXX&XXXXXXXX
+            # MCU&WIFI&<ssid>&<password>
             if r.startswith(f"{RSP_PREFIX}WIFI&"):
                 parts = r.split("&")
                 if len(parts) >= 4:
