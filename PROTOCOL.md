@@ -43,7 +43,7 @@ Frame sync word: `0xFFF348C4`. No DRM, no encryption, no proprietary codec.
 >> APP&SK&<16-char-session-key>
 << MCU&SK&OK
 ```
-The 16-character session key authenticates the connection. Capture yours by sniffing the vendor app's `APP&SK&` write with PacketLogger (or `pocket-libre sniff`). The first 8 characters are reused as the device's WiFi AP password — treat the key as a secret.
+The 16-character session key authenticates the connection. Capture yours from an HCI capture of the vendor app's `APP&SK&` write (e.g. PacketLogger on macOS/iOS, or Android's Bluetooth HCI snoop log) — `pocket-libre sniff` cannot see it, since it only observes notifications on its own connection. The first 8 characters are reused as the device's WiFi AP password — treat the key as a secret.
 
 ### Device Info
 

@@ -788,8 +788,12 @@ async function loadSettings() {
     const cfg = await r.json();
 
     document.getElementById('cfgAddress').value = cfg.device?.address || '';
-    document.getElementById('cfgSessionKey').value = cfg.device?.session_key || '';
     document.getElementById('cfgOutputDir').value = cfg.output?.directory || '~/Pocket Libre';
+
+    // Session key - show masked if set
+    const skField = document.getElementById('cfgSessionKey');
+    if (cfg.device?._session_key_set) skField.placeholder = cfg.device.session_key + ' (saved)';
+    else skField.value = cfg.device?.session_key || '';
 
     // API keys - show masked if set
     const akField = document.getElementById('cfgAnthropicKey');
@@ -809,7 +813,6 @@ async function saveSettings() {
   const config = {
     device: {
       address: document.getElementById('cfgAddress').value,
-      session_key: document.getElementById('cfgSessionKey').value,
     },
     api: {},
     output: {
@@ -821,6 +824,8 @@ async function saveSettings() {
     },
   };
 
+  const sk = document.getElementById('cfgSessionKey').value;
+  if (sk) config.device.session_key = sk;
   const ak = document.getElementById('cfgAnthropicKey').value;
   if (ak) config.api.anthropic_key = ak;
   const hf = document.getElementById('cfgHfToken').value;

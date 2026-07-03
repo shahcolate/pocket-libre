@@ -59,7 +59,7 @@ async def get_config():
             continue
         safe[section] = {}
         for k, v in values.items():
-            if k in ("anthropic_key", "hf_token") and v and len(str(v)) > 8:
+            if k in ("anthropic_key", "hf_token", "session_key") and v and len(str(v)) > 8:
                 safe[section][k] = f"...{str(v)[-4:]}"
                 safe[section][f"_{k}_set"] = True
             else:
@@ -82,6 +82,17 @@ async def update_config(update: ConfigUpdate):
                 config[section][k] = v
     save_config(config)
     return {"status": "ok"}
+
+
+def _require_device(config: dict) -> tuple[str, str]:
+    """Resolve device address and session key, or raise 400 pointing to Settings."""
+    address = resolve_address(config)
+    if not address:
+        raise HTTPException(400, "No device address configured. Go to Settings.")
+    sk = resolve_session_key(config)
+    if not sk:
+        raise HTTPException(400, "No session key configured. Go to Settings.")
+    return address, sk
 
 
 # ── Device Scan & Status ────────────────────────
@@ -115,12 +126,7 @@ async def device_busy():
 @app.get("/api/device/status")
 async def device_status():
     config = load_config()
-    address = resolve_address(config)
-    if not address:
-        raise HTTPException(400, "No device address configured. Go to Settings.")
-    sk = resolve_session_key(config)
-    if not sk:
-        raise HTTPException(400, "No session key configured. Go to Settings.")
+    address, sk = _require_device(config)
 
     if ble_lock.locked():
         raise HTTPException(409, "Device is busy with another operation.")
@@ -156,12 +162,7 @@ async def device_status():
 @app.get("/api/device/recordings")
 async def device_recordings():
     config = load_config()
-    address = resolve_address(config)
-    if not address:
-        raise HTTPException(400, "No device address configured.")
-    sk = resolve_session_key(config)
-    if not sk:
-        raise HTTPException(400, "No session key configured. Go to Settings.")
+    address, sk = _require_device(config)
 
     if ble_lock.locked():
         raise HTTPException(409, "Device is busy.")
@@ -195,12 +196,7 @@ async def device_recordings():
 async def download_recording(date: str, timestamp: str):
     """Download a recording over BLE with SSE progress updates."""
     config = load_config()
-    address = resolve_address(config)
-    if not address:
-        raise HTTPException(400, "No device address configured.")
-    sk = resolve_session_key(config)
-    if not sk:
-        raise HTTPException(400, "No session key configured. Go to Settings.")
+    address, sk = _require_device(config)
     out_root = Path(get_output_dir(config))
 
     if ble_lock.locked():
@@ -268,25 +264,26 @@ async def download_recording(date: str, timestamp: str):
 async def process_recording(date: str, timestamp: str):
     """Download, transcribe, and summarize with SSE progress."""
     config = load_config()
-    address = resolve_address(config)
-    if not address:
-        raise HTTPException(400, "No device address configured.")
-    sk = resolve_session_key(config)
-    if not sk:
-        raise HTTPException(400, "No session key configured. Go to Settings.")
     out_root = Path(get_output_dir(config))
+    audio_path = out_root / date / f"{timestamp}.mp3"
+    # Device access is only needed when the audio isn't on disk yet;
+    # reprocessing a downloaded file must work without a session key.
+    needs_download = not audio_path.exists()
+    if needs_download:
+        address, sk = _require_device(config)
+    else:
+        address = sk = None
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")
     anthropic_key = resolve_anthropic_key(config)
     hf_token = resolve_hf_token(config)
 
     async def event_stream():
-        rec_dir = out_root / date
+        rec_dir = audio_path.parent
         rec_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = rec_dir / f"{timestamp}.mp3"
 
         # Download if not already on disk
-        if not audio_path.exists():
+        if needs_download:
             if ble_lock.locked():
                 yield _sse({"step": "error", "message": "Device is busy."})
                 return
@@ -405,12 +402,7 @@ async def process_recording(date: str, timestamp: str):
 async def sync_all():
     """Download all new recordings, transcribe, and summarize. SSE progress."""
     config = load_config()
-    address = resolve_address(config)
-    if not address:
-        raise HTTPException(400, "No device address configured.")
-    sk = resolve_session_key(config)
-    if not sk:
-        raise HTTPException(400, "No session key configured. Go to Settings.")
+    address, sk = _require_device(config)
     out_root = Path(get_output_dir(config))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")

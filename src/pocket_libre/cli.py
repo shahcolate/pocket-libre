@@ -47,6 +47,18 @@ def _require_session_key(session_key: str | None, config: dict) -> str:
     return sk
 
 
+def _prompt_secret(label: str, existing: str) -> str | None:
+    """Prompt for a secret, showing a masked default when one exists.
+
+    Returns the stripped new value, or None to keep the existing one.
+    """
+    masked = f"...{existing[-4:]}" if len(existing) > 4 else ""
+    value = click.prompt(label, default=masked or "", show_default=bool(masked))
+    if value and not value.startswith("..."):
+        return value.strip()
+    return None
+
+
 @click.group()
 @click.version_option()
 @click.pass_context
@@ -72,12 +84,12 @@ def setup(ctx):
     ))
 
     config = ctx.obj["config"]
-    new_config = {
-        "device": dict(config.get("device", {})),
-        "api": dict(config.get("api", {})),
-        "output": dict(config.get("output", {})),
-        "defaults": dict(config.get("defaults", {})),
-    }
+    # Carry over every existing section so re-running setup never wipes
+    # settings the wizard doesn't manage (e.g. [analysis]).
+    new_config = {section: dict(values) for section, values in config.items()
+                  if isinstance(values, dict)}
+    for section in ("device", "api", "output", "defaults"):
+        new_config.setdefault(section, {})
 
     # Step 1: Device address
     console.print("\n[bold cyan]Step 1: Device Address[/bold cyan]")
@@ -109,10 +121,10 @@ def setup(ctx):
 
     console.print("\n  [bold]Session Key[/bold] (16 characters, authenticates the BLE connection)")
     console.print("  [dim]Capture it from the vendor app's APP&SK& write — see PROTOCOL.md.[/dim]")
-    existing_sk = new_config["device"].get("session_key", "")
-    masked_sk = f"...{existing_sk[-4:]}" if len(existing_sk) > 4 else ""
-    sk = click.prompt("  Session key", default=masked_sk or "", show_default=bool(masked_sk))
-    if sk and not sk.startswith("..."):
+    sk = _prompt_secret("  Session key", new_config["device"].get("session_key", ""))
+    if sk:
+        if len(sk) != 16:
+            console.print("  [yellow]Warning: session keys are 16 characters — double-check the value.[/yellow]")
         new_config["device"]["session_key"] = sk
 
     # Step 2: API keys
@@ -122,19 +134,15 @@ def setup(ctx):
     console.print("  [dim]Get one at: https://console.anthropic.com/settings/keys[/dim]")
     console.print("  [dim]Cost: ~$0.003 per recording (summary + entities + mind map)[/dim]")
     console.print("  [dim]Transcription works without this key (runs locally).[/dim]")
-    existing_key = new_config["api"].get("anthropic_key", "")
-    masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else ""
-    anthropic_key = click.prompt("  Anthropic API key", default=masked or "", show_default=bool(masked))
-    if anthropic_key and not anthropic_key.startswith("..."):
+    anthropic_key = _prompt_secret("  Anthropic API key", new_config["api"].get("anthropic_key", ""))
+    if anthropic_key:
         new_config["api"]["anthropic_key"] = anthropic_key
 
     console.print("\n  [bold]HuggingFace Token[/bold] (optional, for speaker identification)")
     console.print("  [dim]Get one at: https://huggingface.co/settings/tokens[/dim]")
     console.print("  [dim]Free tier works. Enables speaker diarization.[/dim]")
-    existing_hf = new_config["api"].get("hf_token", "")
-    masked_hf = f"...{existing_hf[-4:]}" if len(existing_hf) > 4 else ""
-    hf_token = click.prompt("  HuggingFace token", default=masked_hf or "", show_default=bool(masked_hf))
-    if hf_token and not hf_token.startswith("..."):
+    hf_token = _prompt_secret("  HuggingFace token", new_config["api"].get("hf_token", ""))
+    if hf_token:
         new_config["api"]["hf_token"] = hf_token
 
     # Step 3: Output directory
@@ -170,7 +178,7 @@ def setup(ctx):
         if click.confirm("\n  Test connection to device?", default=True):
             try:
                 async def _test():
-                    sk = resolve_session_key(new_config)
+                    sk = new_config["device"]["session_key"]
                     async with PocketCommander(new_config["device"]["address"]) as cmd:
                         ok = await cmd.authenticate(sk)
                         if ok:
@@ -182,6 +190,16 @@ def setup(ctx):
             except Exception as e:
                 console.print(f"  [yellow]Connection failed: {e}[/yellow]")
                 console.print("  [dim]Make sure the device is awake (press button).[/dim]")
+
+    if not new_config["device"].get("session_key"):
+        console.print(Panel(
+            "[bold yellow]No session key configured.[/bold yellow]\n\n"
+            "Device commands (status, list, download, sync, web) won't work\n"
+            "until you set one. Capture it from the vendor app's APP&SK& write\n"
+            "(see PROTOCOL.md), then run:\n"
+            "  pocket-libre config --set device.session_key=YOUR-KEY",
+            border_style="yellow",
+        ))
 
     console.print(Panel(
         "[bold green]Setup complete![/bold green]\n\n"
@@ -229,7 +247,7 @@ def show_config(ctx, show_path: bool, set_value: str | None):
         console.print(f"\n[bold cyan][{section}][/bold cyan]")
         for key, val in values.items():
             display = val
-            if key in ("anthropic_key", "hf_token") and val and len(str(val)) > 8:
+            if key in ("anthropic_key", "hf_token", "session_key") and val and len(str(val)) > 8:
                 display = f"...{str(val)[-4:]}"
             console.print(f"  {key} = {display}")
 
@@ -502,7 +520,7 @@ def download_all(ctx, address: str | None, session_key: str | None,
             console.print("[dim]Authenticating...[/dim]")
             if not await cmd.authenticate(session_key):
                 console.print("[red]Auth failed.[/red]")
-                return
+                return []
 
             all_recs = await cmd.list_all_recordings()
             if since:
@@ -510,7 +528,7 @@ def download_all(ctx, address: str | None, session_key: str | None,
 
             if not all_recs:
                 console.print("[yellow]No recordings found.[/yellow]")
-                return
+                return []
 
             console.print(f"[bold]{len(all_recs)} recording(s) to download[/bold]\n")
 
@@ -546,8 +564,9 @@ def download_all(ctx, address: str | None, session_key: str | None,
                     console.print(f"    [red]No data received[/red]")
 
             console.print(f"\n[bold green]Downloaded {len(downloaded_paths)} recording(s) to {out_root}[/bold green]")
+            return downloaded_paths
 
-    asyncio.run(_run())
+    downloaded_paths = asyncio.run(_run())
 
     if do_process and downloaded_paths:
         console.print("\n[bold cyan]Processing recordings...[/bold cyan]\n")
@@ -575,13 +594,14 @@ def download_all(ctx, address: str | None, session_key: str | None,
               help="Summary style.")
 @click.option("--anthropic-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY).")
 @click.option("--hf-token", default=None, help="HuggingFace token for speaker diarization.")
+@click.option("--key", "session_key", default=None, help="Session key.")
 @click.option("--skip-process", is_flag=True, help="Only download, skip transcription and summary.")
 @click.option("--prompt", default=None, help="Custom summary prompt (use {transcript} placeholder).")
 @click.pass_context
 def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
          whisper_model: str | None, style: str | None,
          anthropic_key: str | None, hf_token: str | None,
-         skip_process: bool, prompt: str | None):
+         session_key: str | None, skip_process: bool, prompt: str | None):
     """Sync all new recordings: download, transcribe, summarize.
 
     \b
@@ -598,7 +618,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
     style = style or get(config, "defaults", "summary_style", default="meeting")
     anthropic_key = resolve_anthropic_key(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
-    session_key = _require_session_key(None, config)
+    session_key = _require_session_key(session_key, config)
 
     if not anthropic_key and not skip_process:
         console.print(Panel(
