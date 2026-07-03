@@ -15,7 +15,7 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 DEFAULTS = {
     "device": {
         "address": "",
-        "session_key": "YOUR-SESSION-KEY",
+        "session_key": "",
     },
     "api": {
         "anthropic_key": "",
@@ -100,10 +100,9 @@ def resolve_address(config: dict, cli_value: str | None = None) -> str | None:
     return get(config, "device", "address", cli_value=cli_value)
 
 
-def resolve_session_key(config: dict, cli_value: str | None = None) -> str:
-    """Resolve session key with hardcoded fallback."""
-    return get(config, "device", "session_key", cli_value=cli_value,
-               default="YOUR-SESSION-KEY")
+def resolve_session_key(config: dict, cli_value: str | None = None) -> str | None:
+    """Resolve session key from config chain."""
+    return get(config, "device", "session_key", cli_value=cli_value)
 
 
 def resolve_anthropic_key(config: dict, cli_value: str | None = None) -> str | None:

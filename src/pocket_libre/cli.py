@@ -36,6 +36,17 @@ def _require_address(address: str | None, config: dict) -> str:
     return addr
 
 
+def _require_session_key(session_key: str | None, config: dict) -> str:
+    """Resolve session key or exit with helpful error."""
+    sk = resolve_session_key(config, session_key)
+    if not sk:
+        raise click.UsageError(
+            "No session key. Run 'pocket-libre setup' or pass --key.\n"
+            "Capture yours from the vendor app's APP&SK& write (see PROTOCOL.md)."
+        )
+    return sk
+
+
 @click.group()
 @click.version_option()
 @click.pass_context
@@ -96,6 +107,14 @@ def setup(ctx):
     if addr:
         new_config["device"]["address"] = addr
 
+    console.print("\n  [bold]Session Key[/bold] (16 characters, authenticates the BLE connection)")
+    console.print("  [dim]Capture it from the vendor app's APP&SK& write — see PROTOCOL.md.[/dim]")
+    existing_sk = new_config["device"].get("session_key", "")
+    masked_sk = f"...{existing_sk[-4:]}" if len(existing_sk) > 4 else ""
+    sk = click.prompt("  Session key", default=masked_sk or "", show_default=bool(masked_sk))
+    if sk and not sk.startswith("..."):
+        new_config["device"]["session_key"] = sk
+
     # Step 2: API keys
     console.print("\n[bold cyan]Step 2: API Keys[/bold cyan]")
 
@@ -147,7 +166,7 @@ def setup(ctx):
     console.print(f"\n[green]Config saved to {CONFIG_FILE}[/green]")
 
     # Test connection
-    if new_config["device"].get("address"):
+    if new_config["device"].get("address") and new_config["device"].get("session_key"):
         if click.confirm("\n  Test connection to device?", default=True):
             try:
                 async def _test():
@@ -331,7 +350,7 @@ def status(ctx, address: str | None, session_key: str | None):
     """Connect to Pocket and show device status (battery, firmware, storage)."""
     config = ctx.obj["config"]
     address = _require_address(address, config)
-    session_key = resolve_session_key(config, session_key)
+    session_key = _require_session_key(session_key, config)
 
     async def _run():
         async with PocketCommander(address) as cmd:
@@ -371,7 +390,7 @@ def list_recordings(ctx, address: str | None, session_key: str | None, date: str
     """List recordings stored on the Pocket device."""
     config = ctx.obj["config"]
     address = _require_address(address, config)
-    session_key = resolve_session_key(config, session_key)
+    session_key = _require_session_key(session_key, config)
 
     from rich.table import Table
 
@@ -421,7 +440,7 @@ def download(ctx, address: str | None, session_key: str | None,
     """Download a specific recording over BLE."""
     config = ctx.obj["config"]
     address = _require_address(address, config)
-    session_key = resolve_session_key(config, session_key)
+    session_key = _require_session_key(session_key, config)
     from pocket_libre.protocol import MP3_SYNC_WORD
 
     async def _run():
@@ -474,7 +493,7 @@ def download_all(ctx, address: str | None, session_key: str | None,
     """
     config = ctx.obj["config"]
     address = _require_address(address, config)
-    session_key = resolve_session_key(config, session_key)
+    session_key = _require_session_key(session_key, config)
     out_root = Path(get_output_dir(config, output_dir))
     from pocket_libre.protocol import MP3_SYNC_WORD
 
@@ -579,7 +598,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
     style = style or get(config, "defaults", "summary_style", default="meeting")
     anthropic_key = resolve_anthropic_key(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
-    session_key = resolve_session_key(config)
+    session_key = _require_session_key(None, config)
 
     if not anthropic_key and not skip_process:
         console.print(Panel(

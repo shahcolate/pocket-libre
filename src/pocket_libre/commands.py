@@ -276,7 +276,7 @@ class PocketCommander:
         """Get WiFi AP credentials. Returns (ssid, password) or None."""
         responses = await self._send("WIFI")
         for r in responses:
-            # MCU&WIFI&PKT01_GREY_XXXXXXXX&XXXXXXXX
+            # MCU&WIFI&<ssid>&<password>
             if r.startswith(f"{RSP_PREFIX}WIFI&"):
                 parts = r.split("&")
                 if len(parts) >= 4:
