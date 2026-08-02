@@ -216,6 +216,16 @@ class PocketCommander:
                 await asyncio.sleep(0.2)
         return all_recs
 
+    async def delete_recording(self, recording: Recording) -> bool:
+        """Delete a recording from the device.
+
+        Protocol (from PacketLogger capture of official app):
+            >> APP&D&<date>&<timestamp>
+            << MCU&D
+        """
+        responses = await self._send(f"D&{recording.date}&{recording.timestamp}")
+        return any(r == f"{RSP_PREFIX}D" or r.startswith(f"{RSP_PREFIX}D&") for r in responses)
+
     # ── BLE File Transfer ────────────────────────
 
     async def download_ble(

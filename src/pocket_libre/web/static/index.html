@@ -44,6 +44,8 @@ a:hover { text-decoration: underline; }
 .btn:hover { background: var(--border); }
 .btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 .btn.primary:hover { opacity: 0.9; }
+.btn.danger { background: transparent; color: var(--red); border-color: var(--red); }
+.btn.danger:hover { background: rgba(247,118,142,0.15); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-group { display: flex; gap: 0.5rem; margin-top: 1rem; }
 
@@ -262,6 +264,22 @@ tr:hover td { background: var(--bg3); }
           <option value="raw">Raw (general summary)</option>
         </select>
       </div>
+      <div class="form-group">
+        <label>Sync Mode</label>
+        <select id="cfgSyncMode">
+          <option value="sync">Sync — keep files on device</option>
+          <option value="sync-and-delete">Sync and delete — remove from device after download</option>
+        </select>
+        <div class="hint">What happens on the Pocket after a successful download. Local copies are never deleted.</div>
+      </div>
+      <div class="form-group">
+        <label>Process Mode</label>
+        <select id="cfgProcessMode">
+          <option value="download">Download only — pull audio, skip Whisper / summaries</option>
+          <option value="download-and-process">Download and process — transcribe and summarize</option>
+        </select>
+        <div class="hint">Applies to Sync All in the UI and <code>pocket-libre sync</code>. You can still process individual files later.</div>
+      </div>
     </div>
     <div class="btn-group">
       <button class="btn primary" onclick="saveSettings()">Save Settings</button>
@@ -348,6 +366,7 @@ async function fetchDeviceRecordings() {
         <td>
           <button class="btn" onclick="startDownload('${rec.date}','${rec.timestamp}')">Download</button>
           <button class="btn primary" onclick="startProcess('${rec.date}','${rec.timestamp}')">Download & Process</button>
+          <button class="btn danger" onclick="deleteDeviceRecording('${rec.date}','${rec.timestamp}')">Delete</button>
         </td>
       </tr>`;
     }
@@ -360,6 +379,26 @@ async function fetchDeviceRecordings() {
 
 function startDownload(date, ts) { runSSE(`/api/download/${date}/${ts}`); }
 function startProcess(date, ts) { runSSE(`/api/process/${date}/${ts}`); }
+
+async function deleteDeviceRecording(date, ts) {
+  if (!confirm(`Delete ${date}/${ts} from the Pocket device?\n\nLocal copies are not removed.`)) return;
+  setDeviceBusy(true);
+  try {
+    const r = await fetch(`/api/device/${encodeURIComponent(date)}/${encodeURIComponent(ts)}`, {
+      method: 'DELETE',
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    toast(`Deleted ${date}/${ts} from device`, 'success');
+    await fetchDeviceRecordings();
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'error');
+  } finally {
+    setDeviceBusy(false);
+  }
+}
 
 function setDeviceBusy(busy) {
   const ids = ['btnLoadRecs', 'btnSyncAll', 'syncAllBtn'];
@@ -806,7 +845,27 @@ async function loadSettings() {
 
     if (cfg.defaults?.whisper_model) document.getElementById('cfgWhisperModel').value = cfg.defaults.whisper_model;
     if (cfg.defaults?.summary_style) document.getElementById('cfgSummaryStyle').value = cfg.defaults.summary_style;
+    if (cfg.defaults?.sync_mode) document.getElementById('cfgSyncMode').value = cfg.defaults.sync_mode;
+    if (cfg.defaults?.process_mode) document.getElementById('cfgProcessMode').value = cfg.defaults.process_mode;
+    updateSyncButtonLabels(
+      cfg.defaults?.sync_mode || 'sync',
+      cfg.defaults?.process_mode || 'download-and-process',
+    );
   } catch {}
+}
+
+function updateSyncButtonLabels(syncMode, processMode) {
+  const parts = ['Sync All New'];
+  if (processMode === 'download') parts.push('(download only)');
+  if (syncMode === 'sync-and-delete') parts.push('& Delete');
+  const label = parts.join(' ');
+  const short = syncMode === 'sync-and-delete'
+    ? (processMode === 'download' ? 'Sync & Delete' : 'Sync All & Delete')
+    : (processMode === 'download' ? 'Sync (download)' : 'Sync All New');
+  const syncAllBtn = document.getElementById('syncAllBtn');
+  const btnSyncAll = document.getElementById('btnSyncAll');
+  if (syncAllBtn) syncAllBtn.textContent = label;
+  if (btnSyncAll) btnSyncAll.textContent = short;
 }
 
 async function saveSettings() {
@@ -821,6 +880,8 @@ async function saveSettings() {
     defaults: {
       whisper_model: document.getElementById('cfgWhisperModel').value,
       summary_style: document.getElementById('cfgSummaryStyle').value,
+      sync_mode: document.getElementById('cfgSyncMode').value,
+      process_mode: document.getElementById('cfgProcessMode').value,
     },
   };
 
@@ -837,8 +898,10 @@ async function saveSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
-    if (r.ok) toast('Settings saved!', 'success');
-    else toast('Failed to save', 'error');
+    if (r.ok) {
+      toast('Settings saved!', 'success');
+      updateSyncButtonLabels(config.defaults.sync_mode, config.defaults.process_mode);
+    } else toast('Failed to save', 'error');
   } catch (e) {
     toast('Error: ' + e.message, 'error');
   }

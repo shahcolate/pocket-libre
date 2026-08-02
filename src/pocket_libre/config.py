@@ -27,6 +27,12 @@ DEFAULTS = {
     "defaults": {
         "whisper_model": "base.en",
         "summary_style": "meeting",
+        # "sync" = leave files on device
+        # "sync-and-delete" = after a successful download, delete from device
+        "sync_mode": "sync",
+        # "download" = pull audio only
+        # "download-and-process" = also transcribe / summarize / analyze
+        "process_mode": "download-and-process",
     },
     "analysis": {
         "enabled": "summary,entities",
@@ -115,3 +121,36 @@ def resolve_hf_token(config: dict, cli_value: str | None = None) -> str | None:
     """Resolve HuggingFace token from config chain."""
     return get(config, "api", "hf_token", cli_value=cli_value,
                env_var="HUGGINGFACE_TOKEN")
+
+
+VALID_SYNC_MODES = ("sync", "sync-and-delete")
+VALID_PROCESS_MODES = ("download", "download-and-process")
+
+
+def resolve_sync_mode(config: dict, cli_value: str | None = None) -> str:
+    """Resolve sync mode: 'sync' or 'sync-and-delete'."""
+    mode = get(config, "defaults", "sync_mode", cli_value=cli_value, default="sync")
+    if mode not in VALID_SYNC_MODES:
+        return "sync"
+    return mode
+
+
+def resolve_process_mode(
+    config: dict,
+    cli_value: str | None = None,
+    skip_process: bool | None = None,
+) -> str:
+    """Resolve process mode: 'download' or 'download-and-process'.
+
+    --skip-process (skip_process=True) forces 'download'.
+    """
+    if skip_process is True:
+        return "download"
+    mode = get(
+        config, "defaults", "process_mode",
+        cli_value=cli_value,
+        default="download-and-process",
+    )
+    if mode not in VALID_PROCESS_MODES:
+        return "download-and-process"
+    return mode

@@ -19,7 +19,7 @@ from pocket_libre.config import (
     load_config, save_config, CONFIG_FILE,
     resolve_address, resolve_session_key,
     resolve_anthropic_key, resolve_hf_token,
-    get_output_dir, get,
+    resolve_sync_mode, resolve_process_mode, get_output_dir, get,
 )
 
 console = Console()
@@ -168,6 +168,34 @@ def setup(ctx):
         default=default_model,
     )
     new_config["defaults"]["whisper_model"] = model
+
+    default_sync = new_config["defaults"].get("sync_mode", "sync")
+    sync_mode = click.prompt(
+        "  Sync mode",
+        type=click.Choice(["sync", "sync-and-delete"]),
+        default=default_sync if default_sync in ("sync", "sync-and-delete") else "sync",
+    )
+    new_config["defaults"]["sync_mode"] = sync_mode
+    if sync_mode == "sync-and-delete":
+        console.print(
+            "  [dim]After each successful download, the file will be deleted from the device.[/dim]"
+        )
+
+    default_process = new_config["defaults"].get("process_mode", "download-and-process")
+    process_mode = click.prompt(
+        "  Process mode",
+        type=click.Choice(["download", "download-and-process"]),
+        default=(
+            default_process
+            if default_process in ("download", "download-and-process")
+            else "download-and-process"
+        ),
+    )
+    new_config["defaults"]["process_mode"] = process_mode
+    if process_mode == "download":
+        console.print("  [dim]Sync will download audio only (no Whisper / summaries).[/dim]")
+    else:
+        console.print("  [dim]Sync will download, then transcribe and summarize.[/dim]")
 
     # Save
     save_config(new_config)
@@ -494,6 +522,45 @@ def download(ctx, address: str | None, session_key: str | None,
     asyncio.run(_run())
 
 
+@cli.command("delete")
+@click.option("--address", default=None, help="BLE address of your Pocket device.")
+@click.option("--key", "session_key", default=None, help="Session key.")
+@click.option("--date", required=True, help="Recording date (YYYY-MM-DD).")
+@click.option("--timestamp", required=True, help="Recording timestamp (e.g. 20260801173841).")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.pass_context
+def delete_recording(ctx, address: str | None, session_key: str | None,
+                     date: str, timestamp: str, yes: bool):
+    """Delete a recording from the Pocket device (does not remove local copies)."""
+    config = ctx.obj["config"]
+    address = _require_address(address, config)
+    session_key = _require_session_key(session_key, config)
+
+    if not yes:
+        click.confirm(
+            f"Delete {date}/{timestamp} from the device?",
+            abort=True,
+        )
+
+    async def _run():
+        async with PocketCommander(address) as cmd:
+            console.print("[dim]Authenticating...[/dim]")
+            if not await cmd.authenticate(session_key):
+                console.print("[red]Auth failed.[/red]")
+                return
+
+            rec = Recording(date=date, timestamp=timestamp, size_kb=0)
+            console.print(f"[bold]Deleting {rec.date}/{rec.timestamp}...[/bold]")
+            ok = await cmd.delete_recording(rec)
+            if ok:
+                console.print("[bold green]Deleted from device.[/bold green]")
+                console.print("[dim]Local copies in your output folder were not changed.[/dim]")
+            else:
+                console.print("[red]Delete failed (no MCU&D response).[/red]")
+
+    asyncio.run(_run())
+
+
 @cli.command("download-all")
 @click.option("--address", default=None, help="BLE address of your Pocket device.")
 @click.option("--key", "session_key", default=None, help="Session key.")
@@ -595,19 +662,29 @@ def download_all(ctx, address: str | None, session_key: str | None,
 @click.option("--anthropic-key", default=None, help="Anthropic API key (or set ANTHROPIC_API_KEY).")
 @click.option("--hf-token", default=None, help="HuggingFace token for speaker diarization.")
 @click.option("--key", "session_key", default=None, help="Session key.")
-@click.option("--skip-process", is_flag=True, help="Only download, skip transcription and summary.")
+@click.option("--mode", "sync_mode", default=None,
+              type=click.Choice(["sync", "sync-and-delete"]),
+              help="Override config sync mode for this run.")
+@click.option("--process-mode", default=None,
+              type=click.Choice(["download", "download-and-process"]),
+              help="Override config process mode for this run.")
+@click.option("--skip-process", is_flag=True,
+              help="Only download (same as --process-mode download).")
 @click.option("--prompt", default=None, help="Custom summary prompt (use {transcript} placeholder).")
 @click.pass_context
 def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
          whisper_model: str | None, style: str | None,
          anthropic_key: str | None, hf_token: str | None,
-         session_key: str | None, skip_process: bool, prompt: str | None):
-    """Sync all new recordings: download, transcribe, summarize.
+         session_key: str | None, sync_mode: str | None,
+         process_mode: str | None, skip_process: bool, prompt: str | None):
+    """Sync all new recordings: download, optionally process.
 
     \b
-    Downloads all new recordings from the device over BLE, then
-    transcribes with Whisper (locally) and summarizes with Claude Haiku
-    (~$0.001 per recording). Skips recordings already on disk.
+    Downloads all new recordings from the device over BLE. Processing
+    (Whisper + summaries) follows defaults.process_mode.
+    Device cleanup follows defaults.sync_mode.
+
+    Override for one run with --mode / --process-mode / --skip-process.
     """
     from pocket_libre.commands import download_with_retry
 
@@ -619,15 +696,21 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
     anthropic_key = resolve_anthropic_key(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
     session_key = _require_session_key(session_key, config)
+    sync_mode = resolve_sync_mode(config, sync_mode)
+    delete_after = sync_mode == "sync-and-delete"
+    process_mode = resolve_process_mode(
+        config, cli_value=process_mode, skip_process=skip_process or None,
+    )
+    do_process = process_mode == "download-and-process"
 
-    if not anthropic_key and not skip_process:
+    if not anthropic_key and do_process:
         console.print(Panel(
             "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
             "Transcription works without it (runs locally).\n"
             "To enable AI summaries (~$0.001/recording):\n"
             "  pocket-libre setup\n"
             "  OR set: export ANTHROPIC_API_KEY=sk-ant-...\n\n"
-            "Use --skip-process to just download.",
+            "Use process_mode=download or --skip-process to just download.",
             title="API Key Missing",
             border_style="yellow",
         ))
@@ -659,7 +742,12 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             console.print(f"[green]All {len(all_recs)} recordings already synced.[/green]")
             return
 
-        console.print(f"[bold]{len(new_recs)} new recording(s) to sync[/bold] ({len(all_recs)} total on device)\n")
+        sync_label = "sync-and-delete" if delete_after else "sync"
+        console.print(
+            f"[bold]{len(new_recs)} new recording(s) to sync[/bold] "
+            f"({len(all_recs)} total on device) "
+            f"[dim]| {sync_label} · {process_mode}[/dim]\n"
+        )
 
         # Download each
         for i, rec in enumerate(new_recs, 1):
@@ -684,7 +772,19 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             audio_path.write_bytes(data)
             console.print(f"  [green]Saved {len(data):,} bytes[/green]")
 
-            if skip_process:
+            if delete_after:
+                try:
+                    async with PocketCommander(address) as del_cmd:
+                        if not await del_cmd.authenticate(session_key):
+                            console.print("  [yellow]Download OK but re-auth for delete failed.[/yellow]")
+                        elif await del_cmd.delete_recording(rec):
+                            console.print("  [green]Deleted from device[/green]")
+                        else:
+                            console.print("  [yellow]Download OK but device delete failed.[/yellow]")
+                except Exception as e:
+                    console.print(f"  [yellow]Download OK but device delete failed: {e}[/yellow]")
+
+            if not do_process:
                 continue
 
             # Transcribe
@@ -736,7 +836,8 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
                 except Exception as e:
                     console.print(f"  [yellow]Summary failed: {e}[/yellow]")
 
-        console.print(f"\n[bold green]Sync complete! {len(new_recs)} recording(s) processed.[/bold green]")
+        action = "processed" if do_process else "downloaded"
+        console.print(f"\n[bold green]Sync complete! {len(new_recs)} recording(s) {action}.[/bold green]")
         console.print(f"[dim]Output: {out_root}[/dim]")
 
     asyncio.run(_run())
