@@ -7,9 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Pocket Libre replaces the vendor app for your [Pocket](https://heypocket.com) AI
-voice recorder. It pulls recordings straight off the device over Bluetooth,
-transcribes them locally with Whisper, identifies who spoke, and summarizes with
-your own API key.
+voice recorder. It pulls recordings off the device over Bluetooth, transcribes
+them locally with Whisper, works out who was speaking, and summarizes with your
+own API key.
 
 Your conversations never touch anyone else's servers.
 
@@ -25,11 +25,11 @@ pip install -e . && pocket-libre setup && pocket-libre web
 ## Why
 
 The Pocket is good hardware wrapped in a subscription. The vendor app uploads
-your audio, transcribes it on their servers, and charges $79–179/year for the
-privilege. The device itself does none of that — it just stores MP3 files and
-hands them over on request.
+your audio, transcribes it on their servers, and charges $79–179 a year for the
+privilege.
 
-So this talks to it directly.
+The device itself does none of that. It stores MP3 files and hands them over
+when asked. So this asks it directly.
 
 | | Pocket Pro | Pocket Libre |
 |--|-----------|--------------|
@@ -39,16 +39,16 @@ So this talks to it directly.
 | Annual cost | $79–179 | ~$5 in API credits |
 | Works offline | No | Yes (except summaries) |
 
-Transcription and speaker identification are fully local. Summarization is the
-only step that makes a network call, and it is optional — skip it and you still
-get timestamped, speaker-labeled transcripts.
+Transcription and speaker identification run entirely on your machine.
+Summarization is the only step that touches the network, and you can skip it.
+You still get timestamped, speaker-labeled transcripts.
 
 ## Requirements
 
 - Python 3.10 or newer
 - A Pocket recorder (tested on `PKT01`, firmware 1.3.3)
 - Bluetooth LE support
-- The device's 16-character session key — see [Getting your session key](#getting-your-session-key)
+- The device's 16-character session key (see [below](#getting-your-session-key))
 
 ## Install
 
@@ -70,23 +70,24 @@ pip install -e ".[diarize]"
 pocket-libre setup
 ```
 
-The wizard scans for your device, takes your session key and API keys, and
-writes everything to `~/.pocket-libre/config.toml` (mode `600`). After this you
-never pass `--address` or keys on the command line again.
+The wizard scans for your device, asks for your session key and API keys, and
+writes everything to `~/.pocket-libre/config.toml` with mode `600`. After that
+you never pass `--address` or keys on the command line again.
 
 ### Getting your session key
 
-The 16-character session key authenticates the BLE connection. It is issued to
-the vendor app during pairing, so you have to capture it once from an HCI trace:
+The 16-character session key authenticates the BLE connection. The vendor app
+receives it during pairing, so you need to capture it once from an HCI trace.
 
-- **macOS/iOS** — [PacketLogger](https://developer.apple.com/bluetooth/) (ships
-  with Additional Tools for Xcode). Start a capture, open the vendor app, let it
-  connect, then search the trace for `APP&SK&`.
-- **Android** — enable *Bluetooth HCI snoop log* in Developer Options, connect
-  with the vendor app, then pull `btsnoop_hci.log` and open it in Wireshark.
+**macOS/iOS.** Use [PacketLogger](https://developer.apple.com/bluetooth/), which
+ships with Additional Tools for Xcode. Start a capture, open the vendor app, let
+it connect, then search the trace for `APP&SK&`.
 
-`pocket-libre sniff` cannot find it for you — it only sees notifications on its
-own connection, and the key is something the app *writes*.
+**Android.** Enable *Bluetooth HCI snoop log* in Developer Options, connect with
+the vendor app, then pull `btsnoop_hci.log` and open it in Wireshark.
+
+`pocket-libre sniff` won't find it for you. It only sees notifications on its own
+connection, and the key is something the app *writes*.
 
 Full protocol details are in [PROTOCOL.md](PROTOCOL.md).
 
@@ -98,13 +99,13 @@ Full protocol details are in [PROTOCOL.md](PROTOCOL.md).
 pocket-libre web
 ```
 
-Opens `http://127.0.0.1:8265` — device status, one-click download and
+Opens `http://127.0.0.1:8265`. You get device status, one-click download and
 processing, an audio player, transcripts, summaries, mind maps, and a chat box
 for asking questions about any recording.
 
-> The web interface has **no authentication**. It binds to localhost by
-> default, which is what you want. Passing `--host 0.0.0.0` exposes your
-> transcripts and your device to everyone on the network.
+> The web interface has **no authentication**. It binds to localhost by default.
+> Keep it there. Passing `--host 0.0.0.0` hands your transcripts and your device
+> to everyone on the network.
 
 ### Command line
 
@@ -116,9 +117,9 @@ pocket-libre watch                  # Same, but automatically whenever the devic
 pocket-libre process --input x.mp3  # Process an audio file you already have
 ```
 
-`watch` is the set-and-forget mode: leave it running, and recordings sync
-whenever the Pocket comes in range. It backs off to five-minute checks while the
-device is away.
+Leave `watch` running and recordings sync themselves whenever the Pocket comes
+in range. It backs off to five-minute checks while the device is away, so it
+isn't scanning flat out all day.
 
 ## All commands
 
@@ -180,30 +181,30 @@ so `ANTHROPIC_API_KEY` in your shell overrides the file.
 | **Anthropic** | Summaries, entity extraction, mind maps, chat | ~$0.02/recording | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | **HuggingFace** | Speaker identification via pyannote | Free | [huggingface.co](https://huggingface.co/settings/tokens) |
 
-Both optional. Without an Anthropic key you still get local transcription;
-without a HuggingFace token, speaker labels fall back to Claude-based
-diarization, and then to a single unnamed speaker.
+Both are optional. Without an Anthropic key you still get local transcription.
+Without a HuggingFace token, speaker labeling falls back to Claude, and then to
+a single unnamed speaker.
 
-Cost estimate assumes Claude Haiku 4.5 at $1/$5 per million input/output tokens
-and a typical 30-minute recording with summary, entities, and mind map enabled.
-Every command prints its actual token usage and cost.
+That cost estimate assumes Claude Haiku 4.5 at $1 and $5 per million input and
+output tokens, on a half-hour recording with summary, entities, and mind map all
+enabled. Every command prints what it actually spent.
 
 ## Protocol
 
-The Pocket speaks a plain ASCII command protocol over BLE GATT. Audio is
-standard MP3 (16 kHz mono, ~32 kbps). No encryption, no DRM, no proprietary
-codec. [PROTOCOL.md](PROTOCOL.md) has the full command reference.
+The Pocket speaks a plain ASCII command protocol over BLE GATT, and the audio is
+ordinary MP3 at 16 kHz mono, around 32 kbps. No encryption, no DRM, no
+proprietary codec. [PROTOCOL.md](PROTOCOL.md) has the full command reference.
 
 ## WiFi transfer
 
 BLE transfers run at 3–4 KB/s, so a long recording can take hours. The device
-can raise a WiFi access point and serve files over HTTP instead, and the BLE
-side of that handshake is fully decoded.
+can raise a WiFi access point and serve files over HTTP instead, and the BLE side
+of that handshake is fully decoded.
 
-**The HTTP endpoint it serves files from is not yet confirmed.** `wifi-transfer`
-drives the whole flow and probes for the endpoint, but until someone with a
-device pins it down, it may not find it. If you own a Pocket, this is the single
-most useful thing you can contribute:
+**The HTTP endpoint it serves files from is still unconfirmed.** `wifi-transfer`
+drives the whole flow and probes for the endpoint, but it may come up empty until
+someone with a device pins it down. If you own a Pocket, this is the most useful
+thing you can contribute:
 
 ```bash
 # Join the device's WiFi network first, then:
@@ -211,7 +212,7 @@ pocket-libre wifi-discover --date 2026-03-28 --timestamp 20260328001919
 ```
 
 Paste the output into [an issue](https://github.com/shahcolate/pocket-libre/issues).
-Once it is known, everyone gets fast transfers.
+Once it's known, everyone gets fast transfers.
 
 ## Status
 
@@ -230,22 +231,22 @@ Once it is known, everyone gets fast transfers.
 
 ## Contributing
 
-Pull requests welcome. The most valuable contributions right now:
+Pull requests welcome. The things that would help most right now:
 
-1. **Find the WiFi HTTP endpoint** — run `wifi-discover` on the device AP
-2. **Test on other firmware** — run `pocket-libre explore` and share the output
-3. **Report protocol differences** — capture with PacketLogger and open an issue
+1. **Find the WiFi HTTP endpoint.** Run `wifi-discover` on the device AP.
+2. **Test on other firmware.** Run `pocket-libre explore` and share the output.
+3. **Report protocol differences.** Capture with PacketLogger and open an issue.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and how to run the
+[CONTRIBUTING.md](CONTRIBUTING.md) covers development setup and how to run the
 tests.
 
 ## Legal
 
 This project reverse-engineers a Bluetooth protocol for personal
-interoperability, protected under DMCA Section 1201 exemptions. No DRM is
-circumvented — the audio is unencrypted MP3. You own your device. You own your
-recordings.
+interoperability, protected under DMCA Section 1201 exemptions. Nothing here
+circumvents DRM, because there is none; the audio is unencrypted MP3. You own
+your device. You own your recordings.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
