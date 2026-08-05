@@ -8,19 +8,24 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 
-from pocket_libre.scanner import scan_devices
-from pocket_libre.explorer import explore_device
 from pocket_libre.capture import capture_audio
-from pocket_libre.transcribe import transcribe_audio
-from pocket_libre.sniffer import sniff_all
-from pocket_libre.probe import probe_characteristic
 from pocket_libre.commands import PocketCommander, Recording
 from pocket_libre.config import (
-    load_config, save_config, CONFIG_FILE,
-    resolve_address, resolve_session_key,
-    resolve_anthropic_key, resolve_hf_token,
-    get_output_dir, get,
+    CONFIG_FILE,
+    get,
+    get_output_dir,
+    load_config,
+    resolve_address,
+    resolve_anthropic_key,
+    resolve_hf_token,
+    resolve_session_key,
+    save_config,
 )
+from pocket_libre.explorer import explore_device
+from pocket_libre.probe import probe_characteristic
+from pocket_libre.scanner import scan_devices
+from pocket_libre.sniffer import sniff_all
+from pocket_libre.transcribe import transcribe_audio
 
 console = Console()
 
@@ -99,7 +104,7 @@ def setup(ctx):
         from bleak import BleakScanner
         devices = asyncio.run(BleakScanner.discover(timeout=5.0, return_adv=True))
         pocket_devices = []
-        for d, adv in devices.values():
+        for d, _adv in devices.values():
             if d.name and "pkt" in d.name.lower():
                 pocket_devices.append(d)
                 console.print(f"  Found: [green]{d.name}[/green] ({d.address})")
@@ -343,9 +348,13 @@ def transcribe(input_path: str, model: str, output: str | None, output_format: s
 @click.option("--input", "input_path", required=True, help="Path to raw audio capture.")
 @click.option("--output", default="recording.wav", help="Output .wav file path.")
 @click.option("--sample-rate", default=16000, help="Sample rate in Hz.")
-@click.option("--bit-depth", default=16, type=click.Choice([8, 16], case_sensitive=False))
+# Choice values must be strings: on click 8.1 (our declared floor) a
+# non-string choice raises AttributeError during conversion, which fired
+# even when the flag was omitted because defaults are converted too.
+@click.option("--bit-depth", default="16", type=click.Choice(["8", "16"]),
+              help="Bits per sample.")
 @click.option("--channels", default=1, help="Number of audio channels.")
-def convert(input_path: str, output: str, sample_rate: int, bit_depth: int, channels: int):
+def convert(input_path: str, output: str, sample_rate: int, bit_depth: str, channels: int):
     """Convert raw audio capture to WAV format for playback or transcription."""
     from pocket_libre.audio import raw_to_wav
     raw_to_wav(
@@ -561,7 +570,7 @@ def download_all(ctx, address: str | None, session_key: str | None,
                     downloaded_paths.append(out_path)
                     console.print(f"    [green]Saved {len(data):,} bytes[/green]")
                 else:
-                    console.print(f"    [red]No data received[/red]")
+                    console.print("    [red]No data received[/red]")
 
             console.print(f"\n[bold green]Downloaded {len(downloaded_paths)} recording(s) to {out_root}[/bold green]")
             return downloaded_paths
@@ -678,7 +687,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             console.print()
 
             if not data:
-                console.print(f"  [red]Failed to download.[/red]")
+                console.print("  [red]Failed to download.[/red]")
                 continue
 
             audio_path.write_bytes(data)
@@ -717,7 +726,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
 
             # Summarize
             if anthropic_key:
-                console.print(f"  [dim]Summarizing...[/dim]")
+                console.print("  [dim]Summarizing...[/dim]")
                 try:
                     from pocket_libre.summarize import summarize_transcript
                     summary = summarize_transcript(
@@ -732,7 +741,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
                         full_doc = f"# {rec.timestamp} ({ts})\n\n{summary}\n\n---\n\n## Full Transcript\n\n{transcript_text}"
                         summary_path.write_text(full_doc, encoding="utf-8")
-                        console.print(f"  [green]Summary saved[/green]")
+                        console.print("  [green]Summary saved[/green]")
                 except Exception as e:
                     console.print(f"  [yellow]Summary failed: {e}[/yellow]")
 
@@ -832,7 +841,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
                 border_style="yellow",
             ))
         else:
-            from pocket_libre.summarize import summarize_transcript, estimate_cost
+            from pocket_libre.summarize import estimate_cost, summarize_transcript
             est = estimate_cost(transcript_text)
             console.print(f"[dim]Estimated cost: {est}[/dim]")
 
@@ -854,34 +863,239 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
                 summary_path.write_text(full_doc, encoding="utf-8")
                 console.print(f"[green]Summary saved: {summary_path}[/green]")
 
-    console.print(f"\n[bold green]Done![/bold green]")
+    console.print("\n[bold green]Done![/bold green]")
 
 
-# ── WiFi commands removed — BLE-only now ────────
-# WiFi discovery/transfer code deleted. Use BLE sync instead.
+# ── Background Sync ─────────────────────────────
 
 
-WIFI_REMOVED_MSG = """WiFi transfer has been removed. Use BLE sync instead:
-
-  pocket-libre sync          Download + process all new recordings
-  pocket-libre download-all  Download only
-  pocket-libre web           Use the web interface
-
-BLE is slower but reliable. WiFi may return in a future release."""
-
-
-@cli.command("wifi-discover", hidden=True)
+@cli.command()
+@click.option("--address", default=None, help="BLE address of your Pocket device.")
+@click.option("--key", "session_key", default=None, help="Session key.")
+@click.option("--interval", default=60.0, help="Seconds between presence checks.")
+@click.option("--output-dir", default=None, help="Where to save recordings.")
+@click.option("--process", "do_process", is_flag=True,
+              help="Also transcribe and summarize each new recording.")
 @click.pass_context
-def wifi_discover_removed(ctx):
-    """(Removed) WiFi endpoint discovery."""
-    console.print(WIFI_REMOVED_MSG)
+def watch(ctx, address: str | None, session_key: str | None, interval: float,
+          output_dir: str | None, do_process: bool):
+    """Watch for the device and sync new recordings automatically.
+
+    \b
+    Runs until interrupted. Scans for your Pocket every --interval seconds;
+    when it appears, downloads anything not already on disk. Backs off to
+    5-minute checks while the device is away.
+    """
+    from pocket_libre.watch import sync_new_recordings, watch_loop
+
+    config = ctx.obj["config"]
+    address = _require_address(address, config)
+    session_key = _require_session_key(session_key, config)
+    out_root = Path(get_output_dir(config, output_dir))
+    whisper_model = get(config, "defaults", "whisper_model", default="base.en")
+    style = get(config, "defaults", "summary_style", default="meeting")
+    anthropic_key = resolve_anthropic_key(config)
+    hf_token = resolve_hf_token(config)
+
+    console.print(Panel(
+        f"[bold]Watching for {address}[/bold]\n\n"
+        f"Interval:   {interval:.0f}s\n"
+        f"Output:     {out_root}\n"
+        f"Processing: {'on' if do_process else 'off'}\n\n"
+        "Press Ctrl+C to stop.",
+        border_style="cyan",
+    ))
+
+    async def _sync_once() -> int:
+        return await sync_new_recordings(
+            address=address, session_key=session_key, out_root=out_root,
+            process=do_process, whisper_model=whisper_model, summary_style=style,
+            anthropic_key=anthropic_key, hf_token=hf_token,
+        )
+
+    try:
+        stats = asyncio.run(watch_loop(address, _sync_once, poll_interval=interval))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped.[/yellow]")
+        return
+
+    console.print(
+        f"[dim]{stats.scans} scans, {stats.recordings_synced} recordings synced.[/dim]"
+    )
 
 
-@cli.command("wifi-transfer", hidden=True)
+# ── WiFi Transfer ───────────────────────────────
+
+
+@cli.command("wifi-discover")
+@click.option("--date", required=True, help="Recording date (YYYY-MM-DD).")
+@click.option("--timestamp", required=True, help="Recording timestamp.")
+@click.option("--host", default=None, help="Only probe this host.")
+@click.option("--port", default=None, type=int, help="Only probe this port.")
+def wifi_discover(date: str, timestamp: str, host: str | None, port: int | None):
+    """Probe the device's WiFi AP to find its file-serving HTTP endpoint.
+
+    \b
+    The BLE side of WiFi transfer is fully decoded, but the HTTP endpoint
+    the device serves files from is not yet confirmed. Run this while
+    joined to the device's WiFi network and share the output in an issue:
+    https://github.com/shahcolate/pocket-libre/issues
+    """
+    from pocket_libre.wifi import discover_endpoint
+
+    console.print("[bold]Probing for an HTTP endpoint...[/bold]\n")
+    report = discover_endpoint(
+        date=date, timestamp=timestamp,
+        hosts=[host] if host else None,
+        ports=[port] if port else None,
+    )
+
+    if report.endpoint:
+        console.print(Panel(
+            f"[bold green]Found it![/bold green]\n\n{report.endpoint}\n\n"
+            "Save it so transfers skip discovery:\n"
+            "  pocket-libre config --set "
+            f'wifi.url_template="{report.endpoint.replace(timestamp, "{timestamp}")}"\n\n'
+            "Please also report it so everyone benefits:\n"
+            "  https://github.com/shahcolate/pocket-libre/issues",
+            border_style="green",
+        ))
+        return
+
+    console.print(f"\n[bold]{len(report.probes)} endpoints probed, no MP3 found.[/bold]")
+    if report.hits:
+        console.print("\n[bold]Responded with content (worth a look):[/bold]")
+        for p in report.hits:
+            console.print(f"  {p.status} {p.url} — {p.content_type} {p.length}B")
+    if not report.reachable_hosts:
+        console.print(
+            "\n[yellow]Nothing answered on any candidate host.[/yellow]\n"
+            "Join the device's WiFi network first (see 'pocket-libre wifi-transfer')."
+        )
+
+
+@cli.command("wifi-transfer")
+@click.option("--address", default=None, help="BLE address of your Pocket device.")
+@click.option("--key", "session_key", default=None, help="Session key.")
+@click.option("--date", required=True, help="Recording date (YYYY-MM-DD).")
+@click.option("--timestamp", required=True, help="Recording timestamp.")
+@click.option("--output", default=None, help="Output file path.")
+@click.option("--url", default=None,
+              help="Endpoint URL. Supports {date}/{timestamp}/{filename}.")
 @click.pass_context
-def wifi_transfer_removed(ctx):
-    """(Removed) WiFi file transfer."""
-    console.print(WIFI_REMOVED_MSG)
+def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
+                  timestamp: str, output: str | None, url: str | None):
+    """Download a recording over WiFi instead of BLE.
+
+    \b
+    BLE runs at ~3-4 KB/s, so a long recording takes hours. This raises the
+    device's WiFi access point and pulls the file over HTTP instead.
+
+    You must join the device's WiFi network when prompted — your machine
+    cannot stay on your normal network during the transfer.
+    """
+    from pocket_libre.commands import PocketCommander, Recording
+    from pocket_libre.wifi import (
+        DEFAULT_HOST,
+        build_url,
+        discover_endpoint,
+        download_file,
+    )
+
+    config = ctx.obj["config"]
+    address = _require_address(address, config)
+    session_key = _require_session_key(session_key, config)
+    url_template = url or get(config, "wifi", "url_template", default="")
+
+    rec = Recording(date=date, timestamp=timestamp, size_kb=0)
+    out_path = Path(output) if output else Path(f"{timestamp}.mp3")
+
+    async def _stage() -> tuple[str, str, int]:
+        """Raise the AP and stage the file. Returns (ssid, password, size)."""
+        async with PocketCommander(address) as cmd:
+            if not await cmd.authenticate(session_key):
+                raise click.ClickException("Authentication failed.")
+
+            # Order matters and follows the vendor-app capture in
+            # PROTOCOL.md: trigger WiFi mode, read credentials, then
+            # bring the AP up.
+            console.print("[dim]Requesting WiFi mode...[/dim]")
+            await cmd.wifi_trigger()
+
+            creds = await cmd.wifi_get_credentials()
+            if not creds:
+                raise click.ClickException(
+                    "Device did not report WiFi credentials. "
+                    "It may not support WiFi transfer on this firmware."
+                )
+            ssid, password = creds
+
+            await cmd.wifi_enable()
+            console.print("[dim]Waiting for the access point...[/dim]")
+            if not await cmd.wifi_wait_ready(timeout=90.0):
+                raise click.ClickException("WiFi AP did not become ready.")
+
+            size = await cmd.wifi_select_file(rec)
+            await cmd.wifi_begin_transfer()
+            return ssid, password, size
+
+    async def _cleanup():
+        try:
+            async with PocketCommander(address) as cmd:
+                await cmd.authenticate(session_key)
+                await cmd.wifi_cleanup()
+        except Exception:
+            pass
+
+    ssid, password, expected = asyncio.run(_stage())
+
+    console.print(Panel(
+        f"[bold]Join this WiFi network now[/bold]\n\n"
+        f"Network:  [bold cyan]{ssid}[/bold cyan]\n"
+        f"Password: [bold cyan]{password}[/bold cyan]\n\n"
+        f"File size: {expected:,} bytes"
+        + ("\n\n[dim]Your machine will lose internet until you switch back.[/dim]"),
+        border_style="yellow",
+    ))
+    click.confirm("  Connected to the device's network?", default=True, abort=True)
+
+    if url_template:
+        # Accept either a full URL or a bare path; a bare path is resolved
+        # against the device's default AP address.
+        if url_template.startswith("/"):
+            target = build_url(url_template, DEFAULT_HOST, 80, date, timestamp)
+        else:
+            target = url_template.format(
+                date=date, timestamp=timestamp, filename=f"{timestamp}.mp3"
+            )
+        console.print(f"[dim]Using configured endpoint: {target}[/dim]")
+    else:
+        console.print("[dim]No endpoint configured — probing...[/dim]")
+        report = discover_endpoint(date=date, timestamp=timestamp)
+        if not report.endpoint:
+            asyncio.run(_cleanup())
+            raise click.ClickException(
+                "Could not find the file-serving endpoint.\n"
+                "Run 'pocket-libre wifi-discover' and share the output at\n"
+                "https://github.com/shahcolate/pocket-libre/issues — then use\n"
+                "--url once it is known. Falling back: 'pocket-libre download'."
+            )
+        target = report.endpoint
+
+    def progress(current: int, total: int):
+        pct = 100 * current // total if total else 0
+        console.print(f"\r  [dim]{current:,}/{total:,} bytes ({pct}%)[/dim]", end="")
+
+    written = download_file(target, out_path, expected_size=expected,
+                            progress_callback=progress)
+    console.print()
+    asyncio.run(_cleanup())
+
+    if not written:
+        raise click.ClickException("Transfer failed. Reconnect to your normal network.")
+
+    console.print(f"[bold green]Saved {written:,} bytes to {out_path}[/bold green]")
+    console.print("[dim]You can reconnect to your normal WiFi network now.[/dim]")
 
 
 # ── Web Interface ───────────────────────────────
@@ -897,19 +1111,34 @@ def web(host: str, port: int, no_browser: bool):
     Opens a browser-based UI for managing recordings, transcripts,
     and summaries. No terminal required after launch.
     """
-    import uvicorn
     import webbrowser
+
+    import uvicorn
+
+    # 0.0.0.0 is not a connectable address — point the browser at loopback.
+    browse_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
     console.print(Panel(
         f"[bold]Pocket Libre Web UI[/bold]\n\n"
-        f"Starting at http://{host}:{port}\n"
+        f"Starting at http://{browse_host}:{port}\n"
         f"Press Ctrl+C to stop.",
         border_style="cyan",
     ))
 
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(Panel(
+            "[bold yellow]This binds a non-loopback address.[/bold yellow]\n\n"
+            "The web interface has no authentication. Anyone who can reach\n"
+            f"{host}:{port} can read your transcripts and summaries, control\n"
+            "your device, and spend your API credits.\n\n"
+            "Only do this on a network you trust.",
+            title="Warning",
+            border_style="yellow",
+        ))
+
     if not no_browser:
         import threading
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://{browse_host}:{port}")).start()
 
     uvicorn.run("pocket_libre.web.app:app", host=host, port=port, log_level="warning")
 

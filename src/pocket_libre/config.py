@@ -49,6 +49,32 @@ def load_config() -> dict:
         return tomli.loads(text)
 
 
+def _escape_toml(value: str) -> str:
+    """Escape a string for a TOML basic string.
+
+    Control characters must be escaped, not emitted raw: a value containing
+    a newline previously produced a config file that failed to parse on the
+    next load, silently wiping every setting.
+    """
+    out = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def save_config(config: dict):
     """Write config dict to ~/.pocket-libre/config.toml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,11 +90,15 @@ def save_config(config: dict):
             elif isinstance(val, int):
                 lines.append(f"{key} = {val}")
             else:
-                escaped = str(val).replace("\\", "\\\\").replace('"', '\\"')
-                lines.append(f'{key} = "{escaped}"')
+                lines.append(f'{key} = "{_escape_toml(str(val))}"')
         lines.append("")
 
     CONFIG_FILE.write_text("\n".join(lines), encoding="utf-8")
+    # Config holds API keys and the device session key — keep it owner-only.
+    try:
+        CONFIG_FILE.chmod(0o600)
+    except OSError:
+        pass
 
 
 def get(config: dict, section: str, key: str,

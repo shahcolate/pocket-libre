@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pocket-libre"
-version = "0.1.0"
+version = "1.0.0"
 description = "Liberate your Pocket AI recorder from the cloud. Local-first BLE audio capture and transcription."
 readme = "README.md"
 license = {text = "MIT"}
@@ -14,14 +14,20 @@ authors = [
 ]
 keywords = ["bluetooth", "ble", "whisper", "transcription", "pocket", "voice-recorder", "local-first", "privacy"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
     "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: System :: Hardware",
 ]
 
@@ -41,8 +47,11 @@ diarize = [
     "torch>=2.0.0",
 ]
 dev = [
-    "ruff>=0.4.0",
+    "ruff>=0.14.0",
     "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "build>=1.0.0",
 ]
 
 [project.scripts]
@@ -52,10 +61,28 @@ pocket-libre = "pocket_libre.cli:cli"
 Homepage = "https://github.com/shahcolate/pocket-libre"
 Repository = "https://github.com/shahcolate/pocket-libre"
 Issues = "https://github.com/shahcolate/pocket-libre/issues"
+Changelog = "https://github.com/shahcolate/pocket-libre/blob/main/CHANGELOG.md"
+Protocol = "https://github.com/shahcolate/pocket-libre/blob/main/PROTOCOL.md"
 
 [tool.ruff]
 target-version = "py310"
 line-length = 100
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # line length is handled by the formatter, not the linter
+    "B008",  # FastAPI dependency injection relies on calls in defaults
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The web UI is a static asset, not a module, so it needs to be declared
+# explicitly or the wheel ships without it and `pocket-libre web` 500s.
+[tool.setuptools.package-data]
+pocket_libre = ["web/static/*"]

@@ -12,22 +12,32 @@ Usage:
 """
 
 import asyncio
+import re
 from dataclasses import dataclass
 
 from bleak import BleakClient
 from rich.console import Console
 
 from pocket_libre.protocol import (
-    CMD_WRITE_CHAR,
-    CMD_NOTIFY_CHAR,
     AUDIO_NOTIFY_CHAR,
+    CMD_NOTIFY_CHAR,
     CMD_PREFIX,
+    CMD_WRITE_CHAR,
     RSP_PREFIX,
     WIFI_STATUS_READY,
 )
 
-
 console = Console()
+
+# Recording identifiers become path components on disk, so they must not
+# contain separators or dot-segments. The device is not a trusted input:
+# a malfunctioning or spoofed peer could return "../" in a LIST response.
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_safe_id(value: str) -> bool:
+    """True if `value` is safe to use as a single filesystem path component."""
+    return bool(value) and value not in (".", "..") and bool(_ID_PATTERN.match(value))
 
 
 @dataclass
@@ -130,7 +140,7 @@ class PocketCommander:
             for r in self._responses:
                 console.print(f"  [green]<<< {r}[/green]")
             if not self._responses:
-                console.print(f"  [dim]<<< (no response)[/dim]")
+                console.print("  [dim]<<< (no response)[/dim]")
 
         return list(self._responses)
 
@@ -186,7 +196,7 @@ class PocketCommander:
     async def list_dirs(self) -> list[str]:
         """List recording dates on device. Returns ['2026-03-26', '2026-03-27', ...]."""
         responses = await self._send("LIST_DIRS")
-        return self._parse_response(responses, "DIRS")
+        return [d for d in self._parse_response(responses, "DIRS") if is_safe_id(d)]
 
     async def list_files(self, date: str) -> list[Recording]:
         """List recordings for a date. Returns list of Recording objects."""
@@ -200,6 +210,12 @@ class PocketCommander:
             if len(parts) >= 5:
                 rec_date = parts[2]
                 timestamp = parts[3]
+                if not (is_safe_id(rec_date) and is_safe_id(timestamp)):
+                    console.print(
+                        f"[yellow]Skipping recording with unsafe name: "
+                        f"{rec_date}/{timestamp}[/yellow]"
+                    )
+                    continue
                 size_kb = int(parts[4]) if parts[4].isdigit() else 0
                 recordings.append(Recording(rec_date, timestamp, size_kb))
         return recordings
@@ -285,13 +301,27 @@ class PocketCommander:
                     return parts[2], parts[3]
         return None
 
-    async def wifi_start(self) -> bool:
-        """Trigger WiFi AP mode on the device."""
+    async def wifi_trigger(self) -> bool:
+        """Put the device into WiFi mode (step 1 of the WiFi sequence)."""
         await self._send("U&WIFI")
         await asyncio.sleep(0.5)
+        return True
 
-        # Turn on WiFi
+    async def wifi_enable(self) -> bool:
+        """Bring the access point up (step 3 of the WiFi sequence)."""
         await self._send("WIFIO")
+        return True
+
+    async def wifi_start(self) -> bool:
+        """Trigger WiFi mode and bring the AP up, back to back.
+
+        Convenience wrapper. Callers that need to read credentials between
+        the two steps — which is the order the vendor app uses, see
+        PROTOCOL.md — should call `wifi_trigger`, `wifi_get_credentials`,
+        and `wifi_enable` individually instead.
+        """
+        await self.wifi_trigger()
+        await self.wifi_enable()
         return True
 
     async def wifi_get_status(self) -> int:

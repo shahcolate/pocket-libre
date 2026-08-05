@@ -2,9 +2,8 @@
 
 from bleak import BleakClient
 from rich.console import Console
-from rich.tree import Tree
 from rich.panel import Panel
-
+from rich.tree import Tree
 
 console = Console()
 

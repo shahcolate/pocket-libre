@@ -2,10 +2,14 @@
 
 from rich.console import Console
 
+from pocket_libre.pricing import (
+    DEFAULT_MODEL,
+    INPUT_PRICE_PER_MTOK,
+    OUTPUT_PRICE_PER_MTOK,
+    format_cost,
+)
 
 console = Console()
-
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 SUMMARY_PROMPTS = {
     "meeting": """You are summarizing a meeting transcript. Be concise and direct.
@@ -110,14 +114,9 @@ def summarize_transcript(
 
     summary = message.content[0].text
 
-    # Estimate cost (Haiku pricing: $0.25/MTok input, $1.25/MTok output)
-    input_tokens = message.usage.input_tokens
-    output_tokens = message.usage.output_tokens
-    cost = (input_tokens * 0.25 + output_tokens * 1.25) / 1_000_000
-
     console.print(
-        f"[dim]Tokens: {input_tokens} in / {output_tokens} out "
-        f"(~${cost:.4f})[/dim]"
+        f"[dim]Tokens: "
+        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
     )
 
     return summary
@@ -127,7 +126,9 @@ def estimate_cost(transcript_text: str) -> str:
     """Estimate API cost before calling. Returns human-readable string."""
     est_input = len(transcript_text) // 4
     est_output = 500
-    cost = (est_input * 0.25 + est_output * 1.25) / 1_000_000
+    cost = (
+        est_input * INPUT_PRICE_PER_MTOK + est_output * OUTPUT_PRICE_PER_MTOK
+    ) / 1_000_000
     return f"~${cost:.4f}"
 
 

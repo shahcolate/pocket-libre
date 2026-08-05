@@ -13,10 +13,9 @@ import json
 
 from rich.console import Console
 
+from pocket_libre.pricing import DEFAULT_MODEL, format_cost
 
 console = Console()
-
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
 # ── Analysis Prompts ───────────────────────────────
 
@@ -138,10 +137,10 @@ def analyze_transcript(
     text = message.content[0].text
 
     # Log cost
-    input_tokens = message.usage.input_tokens
-    output_tokens = message.usage.output_tokens
-    cost = (input_tokens * 0.25 + output_tokens * 1.25) / 1_000_000
-    console.print(f"[dim]{analysis_type}: {input_tokens}+{output_tokens} tokens (~${cost:.4f})[/dim]")
+    console.print(
+        f"[dim]{analysis_type}: "
+        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
+    )
 
     if output_format == "json":
         # Extract JSON from response (Claude may wrap it in markdown code blocks)
@@ -149,7 +148,7 @@ def analyze_transcript(
         if cleaned.startswith("```"):
             # Strip markdown code fence
             lines = cleaned.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [ln for ln in lines if not ln.strip().startswith("```")]
             cleaned = "\n".join(lines)
         try:
             return json.loads(cleaned)
@@ -281,7 +280,9 @@ def chat_with_recording(
         }],
     )
 
-    cost = (message.usage.input_tokens * 0.25 + message.usage.output_tokens * 1.25) / 1_000_000
-    console.print(f"[dim]Chat: {message.usage.input_tokens}+{message.usage.output_tokens} tokens (~${cost:.4f})[/dim]")
+    console.print(
+        f"[dim]Chat: "
+        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
+    )
 
     return message.content[0].text

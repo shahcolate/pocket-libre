@@ -10,10 +10,10 @@ pyannote.audio requires:
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from rich.console import Console
 
+from pocket_libre.pricing import DEFAULT_MODEL, format_cost
 
 console = Console()
 
@@ -86,7 +86,7 @@ def diarize_llm(whisper_segments: list[dict], api_key: str) -> list[SpeakerSegme
 
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=DEFAULT_MODEL,
         max_tokens=1500,
         system=(
             "You identify distinct speakers in transcripts. Analyze speaking patterns, "
@@ -106,14 +106,16 @@ def diarize_llm(whisper_segments: list[dict], api_key: str) -> list[SpeakerSegme
         }],
     )
 
-    cost = (message.usage.input_tokens * 0.25 + message.usage.output_tokens * 1.25) / 1_000_000
-    console.print(f"[dim]Speaker ID: {message.usage.input_tokens}+{message.usage.output_tokens} tokens (~${cost:.4f})[/dim]")
+    console.print(
+        f"[dim]Speaker ID: "
+        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
+    )
 
     # Parse response
     import json
     text = message.content[0].text.strip()
     if text.startswith("```"):
-        text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
+        text = "\n".join(ln for ln in text.split("\n") if not ln.strip().startswith("```"))
 
     try:
         changes = json.loads(text)
