@@ -995,7 +995,12 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
     cannot stay on your normal network during the transfer.
     """
     from pocket_libre.commands import PocketCommander, Recording
-    from pocket_libre.wifi import build_url, discover_endpoint, download_file
+    from pocket_libre.wifi import (
+        DEFAULT_HOST,
+        build_url,
+        discover_endpoint,
+        download_file,
+    )
 
     config = ctx.obj["config"]
     address = _require_address(address, config)
@@ -1011,7 +1016,12 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
             if not await cmd.authenticate(session_key):
                 raise click.ClickException("Authentication failed.")
 
+            # Order matters and follows the vendor-app capture in
+            # PROTOCOL.md: trigger WiFi mode, read credentials, then
+            # bring the AP up.
             console.print("[dim]Requesting WiFi mode...[/dim]")
+            await cmd.wifi_trigger()
+
             creds = await cmd.wifi_get_credentials()
             if not creds:
                 raise click.ClickException(
@@ -1020,7 +1030,7 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
                 )
             ssid, password = creds
 
-            await cmd.wifi_start()
+            await cmd.wifi_enable()
             console.print("[dim]Waiting for the access point...[/dim]")
             if not await cmd.wifi_wait_ready(timeout=90.0):
                 raise click.ClickException("WiFi AP did not become ready.")
@@ -1050,9 +1060,14 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
     click.confirm("  Connected to the device's network?", default=True, abort=True)
 
     if url_template:
-        target = build_url(url_template, "", 80, date, timestamp) \
-            if url_template.startswith("/") else url_template.format(
-                date=date, timestamp=timestamp, filename=f"{timestamp}.mp3")
+        # Accept either a full URL or a bare path; a bare path is resolved
+        # against the device's default AP address.
+        if url_template.startswith("/"):
+            target = build_url(url_template, DEFAULT_HOST, 80, date, timestamp)
+        else:
+            target = url_template.format(
+                date=date, timestamp=timestamp, filename=f"{timestamp}.mp3"
+            )
         console.print(f"[dim]Using configured endpoint: {target}[/dim]")
     else:
         console.print("[dim]No endpoint configured — probing...[/dim]")

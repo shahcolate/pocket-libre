@@ -41,7 +41,10 @@ All of the below were found in a pre-release audit of `0.1.0`. See
 - `pocket-libre wifi-discover` — probes the device's access point across
   candidate hosts, ports, and path templates to locate its file-serving HTTP
   endpoint, and prints a report suitable for filing as an issue.
-- Test suite: 141 tests covering protocol parsing, config resolution, path
+- `PocketCommander.wifi_trigger()` and `wifi_enable()`, so callers can read
+  WiFi credentials between the two steps — the order the vendor app uses.
+  `wifi_start()` still bundles both for callers that don't need to.
+- Test suite: 144 tests covering protocol parsing, config resolution, path
   safety, secret masking, transcript and diarization logic, WiFi discovery and
   transfer, and the watch loop. Runs in ~6 seconds with no device, no network,
   and no model downloads.

@@ -110,7 +110,7 @@ def probe_url(url: str, timeout: float = 5.0, read_bytes: int = 4096) -> Probe:
     probe = Probe(url=url)
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "pocket-libre"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             probe.status = response.status
             probe.content_type = response.headers.get("Content-Type", "")
             head = response.read(read_bytes)
@@ -195,7 +195,7 @@ def download_file(
     written = 0
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "pocket-libre"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             total = int(response.headers.get("Content-Length") or expected_size)
             with partial.open("wb") as fh:
                 while True:

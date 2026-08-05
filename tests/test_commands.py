@@ -141,3 +141,39 @@ async def test_list_dirs_drops_traversal_names(cmd, monkeypatch):
 async def test_authenticate_requires_a_key(cmd):
     with pytest.raises(ValueError):
         await cmd.authenticate("")
+
+
+# ── WiFi command sequencing ─────────────────────
+
+
+class _RecordingSend:
+    """Records the command order the caller drives."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def __call__(self, command, verbose=False):
+        self.sent.append(command)
+        return []
+
+
+@pytest.mark.asyncio
+async def test_wifi_trigger_and_enable_are_separable(cmd, monkeypatch):
+    """Credentials must be readable between triggering WiFi mode and
+    bringing the AP up — the order the vendor app uses (PROTOCOL.md)."""
+    recorder = _RecordingSend()
+    monkeypatch.setattr(cmd, "_send", recorder)
+
+    await cmd.wifi_trigger()
+    await cmd.wifi_get_credentials()
+    await cmd.wifi_enable()
+
+    assert recorder.sent == ["U&WIFI", "WIFI", "WIFIO"]
+
+
+@pytest.mark.asyncio
+async def test_wifi_start_still_bundles_both_steps(cmd, monkeypatch):
+    recorder = _RecordingSend()
+    monkeypatch.setattr(cmd, "_send", recorder)
+    await cmd.wifi_start()
+    assert recorder.sent == ["U&WIFI", "WIFIO"]

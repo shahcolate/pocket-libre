@@ -201,3 +201,15 @@ def test_download_creates_parent_directories(tmp_path, port):
     out = tmp_path / "a" / "b" / "rec.mp3"
     assert download_file(f"http://127.0.0.1:{port}/20260328001919.mp3", out) > 0
     assert out.exists()
+
+
+# ── Bare-path templates ─────────────────────────
+
+
+def test_bare_path_template_resolves_against_default_host():
+    """A path-only template must not produce a hostless `http:///...` URL."""
+    from pocket_libre.wifi import DEFAULT_HOST
+
+    url = build_url("/{filename}", DEFAULT_HOST, 80, "2026-03-28", "20260328001919")
+    assert url.startswith(f"http://{DEFAULT_HOST}/")
+    assert "http:///" not in url

@@ -301,13 +301,27 @@ class PocketCommander:
                     return parts[2], parts[3]
         return None
 
-    async def wifi_start(self) -> bool:
-        """Trigger WiFi AP mode on the device."""
+    async def wifi_trigger(self) -> bool:
+        """Put the device into WiFi mode (step 1 of the WiFi sequence)."""
         await self._send("U&WIFI")
         await asyncio.sleep(0.5)
+        return True
 
-        # Turn on WiFi
+    async def wifi_enable(self) -> bool:
+        """Bring the access point up (step 3 of the WiFi sequence)."""
         await self._send("WIFIO")
+        return True
+
+    async def wifi_start(self) -> bool:
+        """Trigger WiFi mode and bring the AP up, back to back.
+
+        Convenience wrapper. Callers that need to read credentials between
+        the two steps — which is the order the vendor app uses, see
+        PROTOCOL.md — should call `wifi_trigger`, `wifi_get_credentials`,
+        and `wifi_enable` individually instead.
+        """
+        await self.wifi_trigger()
+        await self.wifi_enable()
         return True
 
     async def wifi_get_status(self) -> int:
