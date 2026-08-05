@@ -317,7 +317,7 @@ async function refreshStatus() {
   } catch (e) {
     dot.className = 'status-dot error';
     dot.title = 'Error';
-    el.innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`;
+    el.innerHTML = `<div class="empty" style="color:var(--red)">${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -354,7 +354,7 @@ async function fetchDeviceRecordings() {
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = `<div class="empty" style="color:var(--red)">${e.message}</div>`;
+    el.innerHTML = `<div class="empty" style="color:var(--red)">${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -529,7 +529,7 @@ async function fetchLocalRecordings() {
     }
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = `<div class="empty" style="color:var(--red)">Failed to load: ${e.message}</div>`;
+    el.innerHTML = `<div class="empty" style="color:var(--red)">Failed to load: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -735,7 +735,11 @@ function filterLibrary() {
   });
 }
 
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 
 function renderTranscript(raw) {
   // Parse lines like: [00:15] Speaker 1: Some text here
@@ -767,8 +771,14 @@ function renderTranscript(raw) {
 }
 
 function renderMarkdown(md) {
-  // Simple markdown renderer
-  return md
+  // Simple markdown renderer.
+  //
+  // Escape FIRST. The input is model-generated text derived from recorded
+  // audio, so it is untrusted: without this, a transcript containing
+  // `<img src=x onerror=...>` executes when the summary is displayed.
+  // Escaping before the tag substitutions below is safe because the
+  // patterns only ever match characters that escaping leaves intact.
+  return escapeHtml(md)
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -875,17 +885,25 @@ async function scanForDevice() {
     } else {
       let html = '';
       for (const d of devices) {
+        // Device-advertised values go in a data attribute and are read back
+        // via the DOM, so nothing is interpolated into an executable context.
         html += `<div style="padding:0.3rem 0">
-          <button class="btn" onclick="document.getElementById('cfgAddress').value='${d.address}';document.getElementById('scanResults').innerHTML=''">
-            ${escapeHtml(d.name)} ${d.rssi ? `(${d.rssi} dBm)` : ''}
+          <button class="btn js-pick-device" data-address="${escapeHtml(d.address)}">
+            ${escapeHtml(d.name)} ${d.rssi ? `(${escapeHtml(d.rssi)} dBm)` : ''}
           </button>
-          <span style="color:var(--dim);font-size:0.8rem;margin-left:0.5rem">${d.address}</span>
+          <span style="color:var(--dim);font-size:0.8rem;margin-left:0.5rem">${escapeHtml(d.address)}</span>
         </div>`;
       }
       results.innerHTML = html;
+      results.querySelectorAll('.js-pick-device').forEach(b => {
+        b.addEventListener('click', () => {
+          document.getElementById('cfgAddress').value = b.dataset.address;
+          results.innerHTML = '';
+        });
+      });
     }
   } catch (e) {
-    results.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+    results.innerHTML = `<span style="color:var(--red)">${escapeHtml(e.message)}</span>`;
   }
   btn.disabled = false;
   btn.textContent = 'Scan';

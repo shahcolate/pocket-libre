@@ -9,7 +9,6 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
-
 console = Console()
 
 
@@ -67,7 +66,7 @@ async def auto_detect_audio_char(client: BleakClient) -> str | None:
     Uses known Pocket protocol UUIDs first, then falls back to
     heuristic detection for unknown firmware versions.
     """
-    from pocket_libre.protocol import AUDIO_DATA_CHAR, AUDIO_CHAR_PRIORITY
+    from pocket_libre.protocol import AUDIO_CHAR_PRIORITY
 
     # First: check if the known audio characteristic exists on this device
     all_char_uuids = set()

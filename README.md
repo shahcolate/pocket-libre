@@ -2,11 +2,55 @@
 
 **Liberate your Pocket AI recorder from the cloud.**
 
-Pocket Libre replaces the vendor app for your [Pocket](https://heypocket.com) AI voice recorder. Download recordings directly over Bluetooth, transcribe locally with Whisper, identify speakers, and summarize with your own API keys. No vendor cloud. Your conversations stay on your machine.
+[![CI](https://github.com/shahcolate/pocket-libre/actions/workflows/ci.yml/badge.svg)](https://github.com/shahcolate/pocket-libre/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Quick Start
+Pocket Libre replaces the vendor app for your [Pocket](https://heypocket.com) AI
+voice recorder. It pulls recordings straight off the device over Bluetooth,
+transcribes them locally with Whisper, identifies who spoke, and summarizes with
+your own API key.
 
-### 1. Install
+Your conversations never touch anyone else's servers.
+
+```bash
+pip install -e . && pocket-libre setup && pocket-libre web
+```
+
+<!-- Screenshot: the web UI dashboard showing device battery, storage, and the
+     recording library. Add as docs/screenshot-dashboard.png and link here. -->
+
+---
+
+## Why
+
+The Pocket is good hardware wrapped in a subscription. The vendor app uploads
+your audio, transcribes it on their servers, and charges $79–179/year for the
+privilege. The device itself does none of that — it just stores MP3 files and
+hands them over on request.
+
+So this talks to it directly.
+
+| | Pocket Pro | Pocket Libre |
+|--|-----------|--------------|
+| Transcription | Their servers | Local Whisper, your CPU |
+| Summarization | Cloud, mandatory | Claude Haiku, ~$0.02/recording |
+| Where your audio lives | Their infrastructure | Your disk |
+| Annual cost | $79–179 | ~$5 in API credits |
+| Works offline | No | Yes (except summaries) |
+
+Transcription and speaker identification are fully local. Summarization is the
+only step that makes a network call, and it is optional — skip it and you still
+get timestamped, speaker-labeled transcripts.
+
+## Requirements
+
+- Python 3.10 or newer
+- A Pocket recorder (tested on `PKT01`, firmware 1.3.3)
+- Bluetooth LE support
+- The device's 16-character session key — see [Getting your session key](#getting-your-session-key)
+
+## Install
 
 ```bash
 git clone https://github.com/shahcolate/pocket-libre.git
@@ -14,72 +58,96 @@ cd pocket-libre
 pip install -e .
 ```
 
-> **For speaker identification** (optional): `pip install -e ".[diarize]"` (requires PyTorch)
+Speaker identification is optional and pulls in PyTorch:
 
-### 2. Setup
+```bash
+pip install -e ".[diarize]"
+```
+
+## Setup
 
 ```bash
 pocket-libre setup
 ```
 
-The setup wizard walks you through:
-- Finding your Pocket device (BLE scan)
-- Entering your session key (capture it from the vendor app's `APP&SK&` write — see [PROTOCOL.md](PROTOCOL.md))
-- Entering your API keys (Anthropic for summaries, HuggingFace for speaker ID)
-- Choosing your output directory and preferences
+The wizard scans for your device, takes your session key and API keys, and
+writes everything to `~/.pocket-libre/config.toml` (mode `600`). After this you
+never pass `--address` or keys on the command line again.
 
-### 3. Use
+### Getting your session key
 
-**Web interface** (recommended):
+The 16-character session key authenticates the BLE connection. It is issued to
+the vendor app during pairing, so you have to capture it once from an HCI trace:
+
+- **macOS/iOS** — [PacketLogger](https://developer.apple.com/bluetooth/) (ships
+  with Additional Tools for Xcode). Start a capture, open the vendor app, let it
+  connect, then search the trace for `APP&SK&`.
+- **Android** — enable *Bluetooth HCI snoop log* in Developer Options, connect
+  with the vendor app, then pull `btsnoop_hci.log` and open it in Wireshark.
+
+`pocket-libre sniff` cannot find it for you — it only sees notifications on its
+own connection, and the key is something the app *writes*.
+
+Full protocol details are in [PROTOCOL.md](PROTOCOL.md).
+
+## Use
+
+### Web interface
+
 ```bash
 pocket-libre web
 ```
-Opens a browser UI at `http://localhost:8265` where you can view device status, download recordings, play audio, read transcripts and summaries — no terminal required.
 
-**Command line**:
+Opens `http://127.0.0.1:8265` — device status, one-click download and
+processing, an audio player, transcripts, summaries, mind maps, and a chat box
+for asking questions about any recording.
+
+> The web interface has **no authentication**. It binds to localhost by
+> default, which is what you want. Passing `--host 0.0.0.0` exposes your
+> transcripts and your device to everyone on the network.
+
+### Command line
+
 ```bash
-pocket-libre status              # Check battery, storage, firmware
-pocket-libre list                # List recordings on device
-pocket-libre download-all        # Download all recordings
-pocket-libre sync                # Capture + transcribe + summarize
-pocket-libre process --input recording.mp3  # Process an existing file
+pocket-libre status                 # Battery, firmware, storage
+pocket-libre list                   # What's on the device
+pocket-libre sync                   # Download + transcribe + summarize everything new
+pocket-libre watch                  # Same, but automatically whenever the device appears
+pocket-libre process --input x.mp3  # Process an audio file you already have
 ```
 
-> **Tip**: After running `pocket-libre setup`, you don't need to pass `--address` or API keys on every command — they're saved in `~/.pocket-libre/config.toml`.
+`watch` is the set-and-forget mode: leave it running, and recordings sync
+whenever the Pocket comes in range. It backs off to five-minute checks while the
+device is away.
 
-## Web Interface
-
-Run `pocket-libre web` to launch the browser-based UI:
-
-- **Dashboard** — device battery, firmware, storage at a glance
-- **Device Recordings** — see what's on your Pocket, download or process with one click
-- **Library** — browse downloaded recordings with audio player, transcripts, and summaries
-- **Settings** — configure device address, API keys, whisper model, and output directory
-
-## All Commands
+## All commands
 
 | Command | Description |
 |---------|-------------|
-| `pocket-libre setup` | Interactive setup wizard |
-| `pocket-libre web` | Launch web interface |
-| `pocket-libre config` | View/edit configuration |
-| `pocket-libre scan` | Find nearby BLE devices |
-| `pocket-libre status` | Device battery, firmware, storage |
-| `pocket-libre list` | List recordings on device |
-| `pocket-libre download` | Download a specific recording |
-| `pocket-libre download-all` | Download all recordings |
-| `pocket-libre wifi-transfer` | Download via WiFi (faster) |
-| `pocket-libre sync` | Full pipeline: capture + transcribe + summarize |
-| `pocket-libre process` | Process an existing audio file |
-| `pocket-libre transcribe` | Transcribe audio locally with Whisper |
-| `pocket-libre explore` | Dump GATT services and characteristics |
-| `pocket-libre sniff` | Subscribe to all BLE notifications |
-| `pocket-libre probe` | Probe write characteristics |
-| `pocket-libre convert` | Convert raw audio to WAV |
+| `setup` | Interactive setup wizard |
+| `web` | Launch the web interface |
+| `watch` | Auto-sync whenever the device is in range |
+| `config` | View or edit configuration |
+| `scan` | Find nearby BLE devices |
+| `status` | Device battery, firmware, storage |
+| `list` | List recordings on device |
+| `download` | Download one recording |
+| `download-all` | Download every recording |
+| `sync` | Download, transcribe, and summarize what's new |
+| `process` | Process an existing audio file |
+| `transcribe` | Transcribe locally with Whisper |
+| `convert` | Convert raw audio to WAV |
+| `wifi-transfer` | Download over WiFi instead of BLE ([see caveat](#wifi-transfer)) |
+| `wifi-discover` | Probe for the device's HTTP endpoint |
+| `explore` | Dump GATT services and characteristics |
+| `sniff` | Subscribe to all BLE notifications |
+| `probe` | Probe write characteristics |
+
+Every command takes `--help`.
 
 ## Configuration
 
-All settings are stored in `~/.pocket-libre/config.toml`:
+`~/.pocket-libre/config.toml`:
 
 ```toml
 [device]
@@ -96,69 +164,88 @@ directory = "~/Pocket Libre"
 [defaults]
 whisper_model = "base.en"
 summary_style = "meeting"
+
+[analysis]
+enabled = "summary,entities"
 ```
 
-You can also set values directly:
-```bash
-pocket-libre config --set device.address=YOUR_ADDRESS
-pocket-libre config --set api.anthropic_key=sk-ant-...
-```
+Set values directly with `pocket-libre config --set device.address=...`.
+Resolution order is CLI flag → environment variable → config file → default,
+so `ANTHROPIC_API_KEY` in your shell overrides the file.
 
-## API Keys
+## API keys
 
-| Key | What it does | Cost | Where to get it |
-|-----|-------------|------|-----------------|
-| **Anthropic** | AI summaries of recordings | ~$0.001/recording | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
-| **HuggingFace** | Speaker identification (who said what) | Free | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
+| Key | What it does | Cost | Where |
+|-----|--------------|------|-------|
+| **Anthropic** | Summaries, entity extraction, mind maps, chat | ~$0.02/recording | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+| **HuggingFace** | Speaker identification via pyannote | Free | [huggingface.co](https://huggingface.co/settings/tokens) |
 
-Both are optional. Transcription always runs locally via Whisper — no API key needed.
+Both optional. Without an Anthropic key you still get local transcription;
+without a HuggingFace token, speaker labels fall back to Claude-based
+diarization, and then to a single unnamed speaker.
 
-## Economics
-
-| | Pocket Pro | Pocket Libre |
-|--|-----------|-------------|
-| Transcription | Cloud (their servers) | Local Whisper (your CPU) |
-| Summarization | Cloud (forced) | Claude Haiku (~$0.001/recording) |
-| Annual cost | $79-179/year | ~$2/year |
-| Privacy | Audio leaves your device | Nothing leaves your device* |
-
-*Summarization uses Anthropic API if enabled. Transcription is fully local.
+Cost estimate assumes Claude Haiku 4.5 at $1/$5 per million input/output tokens
+and a typical 30-minute recording with summary, entities, and mind map enabled.
+Every command prints its actual token usage and cost.
 
 ## Protocol
 
-The Pocket uses a simple ASCII command protocol over BLE GATT. Audio is standard MP3 (16kHz mono, ~32kbps). No encryption, no DRM.
+The Pocket speaks a plain ASCII command protocol over BLE GATT. Audio is
+standard MP3 (16 kHz mono, ~32 kbps). No encryption, no DRM, no proprietary
+codec. [PROTOCOL.md](PROTOCOL.md) has the full command reference.
 
-See [PROTOCOL.md](PROTOCOL.md) for the full protocol reference.
+## WiFi transfer
 
-## Project Status
+BLE transfers run at 3–4 KB/s, so a long recording can take hours. The device
+can raise a WiFi access point and serve files over HTTP instead, and the BLE
+side of that handshake is fully decoded.
 
-- [x] BLE device scanning and discovery
-- [x] Full command protocol decoded (APP&/MCU&)
-- [x] Device status, file listing, stored recording download
-- [x] MP3 audio capture and playback
+**The HTTP endpoint it serves files from is not yet confirmed.** `wifi-transfer`
+drives the whole flow and probes for the endpoint, but until someone with a
+device pins it down, it may not find it. If you own a Pocket, this is the single
+most useful thing you can contribute:
+
+```bash
+# Join the device's WiFi network first, then:
+pocket-libre wifi-discover --date 2026-03-28 --timestamp 20260328001919
+```
+
+Paste the output into [an issue](https://github.com/shahcolate/pocket-libre/issues).
+Once it is known, everyone gets fast transfers.
+
+## Status
+
+- [x] BLE scanning and device discovery
+- [x] Full command protocol (`APP&`/`MCU&`)
+- [x] Device status, file listing, downloads
+- [x] MP3 capture and playback
 - [x] Local Whisper transcription
-- [x] Speaker diarization (pyannote.audio)
-- [x] Claude Haiku summarization (4 styles)
-- [x] Full sync pipeline
+- [x] Speaker diarization (pyannote, with Claude and heuristic fallbacks)
+- [x] Claude summarization, entity extraction, mind maps, chat
 - [x] Web interface
 - [x] Config file and setup wizard
-- [ ] WiFi bulk transfer (protocol mapped, HTTP endpoint TBD)
-- [ ] Auto-connect and background sync
+- [x] Auto-connect and background sync (`watch`)
+- [x] WiFi transfer client and endpoint discovery
+- [ ] WiFi HTTP endpoint confirmed against hardware
 
 ## Contributing
 
-If you own a Pocket and want to help:
+Pull requests welcome. The most valuable contributions right now:
 
-1. Run `pocket-libre explore` and share the output
-2. Help discover the WiFi HTTP endpoint (connect to device AP, probe ports)
-3. Capture BLE traffic with PacketLogger during an app WiFi transfer
+1. **Find the WiFi HTTP endpoint** — run `wifi-discover` on the device AP
+2. **Test on other firmware** — run `pocket-libre explore` and share the output
+3. **Report protocol differences** — capture with PacketLogger and open an issue
 
-Open an issue or PR. All contributions welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and how to run the
+tests.
 
 ## Legal
 
-This project reverse-engineers a Bluetooth protocol for personal interoperability purposes, protected under DMCA Section 1201 exemptions. You own your device. You own your recordings.
+This project reverse-engineers a Bluetooth protocol for personal
+interoperability, protected under DMCA Section 1201 exemptions. No DRM is
+circumvented — the audio is unencrypted MP3. You own your device. You own your
+recordings.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

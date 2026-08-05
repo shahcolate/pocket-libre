@@ -4,15 +4,9 @@ import asyncio
 import time
 from collections import defaultdict
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 from rich.console import Console
 from rich.table import Table
-
-from pocket_libre.protocol import (
-    ALL_NOTIFY_CHARS,
-    ALL_WRITE_CHARS,
-)
-
 
 console = Console()
 
@@ -130,7 +124,7 @@ async def _probe_one_char(
             await asyncio.sleep(wait)
 
             if not collector.responses:
-                console.print(f" [dim]... silence[/dim]")
+                console.print(" [dim]... silence[/dim]")
                 rows.append((_short_uuid(write_uuid), hex_sent, "-", "(no response)", "-"))
             else:
                 console.print()
@@ -161,7 +155,7 @@ async def probe_characteristic(
     console.print(f"\n[bold]Scanning for device {address[:12]}...[/bold]")
 
     # First connection: enumerate available write characteristics
-    console.print(f"[dim]Connecting to discover services...[/dim]")
+    console.print("[dim]Connecting to discover services...[/dim]")
     write_char_uuids = []
 
     async with BleakClient(address, timeout=10.0) as client:
@@ -188,7 +182,7 @@ async def probe_characteristic(
 
     probes = [data] if data else DEFAULT_PROBES
     console.print(f"\n[bold]Probing {len(write_char_uuids)} write chars × {len(probes)} payloads[/bold]")
-    console.print(f"[dim]Reconnecting per characteristic to avoid BLE timeout[/dim]")
+    console.print("[dim]Reconnecting per characteristic to avoid BLE timeout[/dim]")
 
     # Probe each characteristic with a fresh connection
     all_rows = []

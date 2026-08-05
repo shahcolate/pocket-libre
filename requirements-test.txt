@@ -1,0 +1,15 @@
+# Lightweight dependency set for running the test suite.
+#
+# The package itself depends on openai-whisper, which pulls in PyTorch
+# (~2GB). Transcription is exercised by hand against real audio, not in
+# CI, so CI installs the package with --no-deps and layers these on top.
+# Everything the tests actually import is listed here.
+bleak>=0.21.0
+click>=8.1.0
+rich>=13.0.0
+fastapi[standard]>=0.115.0
+tomli>=2.0.0; python_version < '3.11'
+
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0

@@ -1,11 +1,9 @@
 """Audio format conversion utilities."""
 
-import struct
 import wave
 from pathlib import Path
 
 from rich.console import Console
-
 
 console = Console()
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -13,15 +13,18 @@ from fastapi.responses import (
     PlainTextResponse,
     StreamingResponse,
 )
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from pocket_libre.commands import PocketCommander, Recording, download_with_retry
+from pocket_libre.commands import PocketCommander, Recording
 from pocket_libre.config import (
-    load_config, save_config,
-    resolve_address, resolve_session_key,
-    resolve_anthropic_key, resolve_hf_token,
-    get_output_dir, get,
+    get,
+    get_output_dir,
+    load_config,
+    resolve_address,
+    resolve_anthropic_key,
+    resolve_hf_token,
+    resolve_session_key,
+    save_config,
 )
 from pocket_libre.protocol import MP3_SYNC_WORD
 
@@ -29,6 +32,35 @@ app = FastAPI(title="Pocket Libre")
 
 STATIC_DIR = Path(__file__).parent / "static"
 ble_lock = asyncio.Lock()
+
+
+# ── Path safety ─────────────────────────────────
+#
+# `date` and `timestamp` arrive as URL path parameters and are interpolated
+# into filesystem paths. Starlette percent-decodes path parameters *after*
+# routing, so a request for `/api/local/%2e%2e/x/transcript` yields
+# date == ".." and escapes the output directory. Validate every component
+# and re-check containment on the resolved path.
+
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_component(value: str, field: str) -> str:
+    """Reject anything that could traverse out of the output directory."""
+    if not value or not _SAFE_COMPONENT.match(value) or value in (".", ".."):
+        raise HTTPException(400, f"Invalid {field}.")
+    return value
+
+
+def _recording_path(out_root: Path, date: str, timestamp: str, suffix: str) -> Path:
+    """Build a path under out_root, refusing anything that escapes it."""
+    _safe_component(date, "date")
+    _safe_component(timestamp, "timestamp")
+    root = out_root.resolve()
+    candidate = (root / date / f"{timestamp}{suffix}").resolve()
+    if candidate != root and root not in candidate.parents:
+        raise HTTPException(400, "Path outside output directory.")
+    return candidate
 
 
 # ── Static Files ────────────────────────────────
@@ -59,8 +91,11 @@ async def get_config():
             continue
         safe[section] = {}
         for k, v in values.items():
-            if k in ("anthropic_key", "hf_token", "session_key") and v and len(str(v)) > 8:
-                safe[section][k] = f"...{str(v)[-4:]}"
+            # Always mask secrets, however short. The old `len > 8` guard
+            # returned short keys verbatim.
+            if k in ("anthropic_key", "hf_token", "session_key") and v:
+                text = str(v)
+                safe[section][k] = f"...{text[-4:]}" if len(text) > 4 else "..."
                 safe[section][f"_{k}_set"] = True
             else:
                 safe[section][k] = v
@@ -111,7 +146,7 @@ async def scan_for_devices():
                 results.append({"name": d.name, "address": d.address, "rssi": rssi})
         return results
     except Exception as e:
-        raise HTTPException(502, f"Scan failed: {e}")
+        raise HTTPException(502, f"Scan failed: {e}") from e
 
 
 @app.get("/api/device/busy")
@@ -156,7 +191,7 @@ async def device_status():
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(502, f"Connection failed: {e}")
+            raise HTTPException(502, f"Connection failed: {e}") from e
 
 
 @app.get("/api/device/recordings")
@@ -186,7 +221,7 @@ async def device_recordings():
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(502, f"Connection failed: {e}")
+            raise HTTPException(502, f"Connection failed: {e}") from e
 
 
 # ── Download & Process (SSE) ────────────────────
@@ -198,6 +233,7 @@ async def download_recording(date: str, timestamp: str):
     config = load_config()
     address, sk = _require_device(config)
     out_root = Path(get_output_dir(config))
+    out_path = _recording_path(out_root, date, timestamp, ".mp3")
 
     if ble_lock.locked():
         raise HTTPException(409, "Device is busy.")
@@ -242,9 +278,7 @@ async def download_recording(date: str, timestamp: str):
                     if mp3_start > 0:
                         data = data[mp3_start:]
 
-                    rec_dir = out_root / date
-                    rec_dir.mkdir(parents=True, exist_ok=True)
-                    out_path = rec_dir / f"{timestamp}.mp3"
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
                     out_path.write_bytes(data)
 
                     yield _sse({
@@ -265,7 +299,7 @@ async def process_recording(date: str, timestamp: str):
     """Download, transcribe, and summarize with SSE progress."""
     config = load_config()
     out_root = Path(get_output_dir(config))
-    audio_path = out_root / date / f"{timestamp}.mp3"
+    audio_path = _recording_path(out_root, date, timestamp, ".mp3")
     # Device access is only needed when the audio isn't on disk yet;
     # reprocessing a downloaded file must work without a session key.
     needs_download = not audio_path.exists()
@@ -499,7 +533,10 @@ async def sync_all():
                 import whisper
                 loop = asyncio.get_event_loop()
                 model = await loop.run_in_executor(None, whisper.load_model, whisper_model)
-                result = await loop.run_in_executor(None, lambda: model.transcribe(str(audio_path), verbose=False))
+                result = await loop.run_in_executor(
+                    None,
+                    lambda m=model, p=audio_path: m.transcribe(str(p), verbose=False),
+                )
                 segments = result.get("segments", [])
                 yield _sse({"step": "transcribe", "recording": i, "total": total,
                             "message": f"{len(segments)} segments"})
@@ -530,7 +567,9 @@ async def sync_all():
                     from pocket_libre.summarize import summarize_transcript
                     summary = await loop.run_in_executor(
                         None,
-                        lambda: summarize_transcript(transcript_text=transcript_text, api_key=anthropic_key, style=summary_style),
+                        lambda t=transcript_text: summarize_transcript(
+                            transcript_text=t, api_key=anthropic_key, style=summary_style
+                        ),
                     )
                     if summary:
                         summary_path = rec_dir / f"{rec.timestamp}_summary.md"
@@ -553,7 +592,9 @@ async def sync_all():
                         from pocket_libre.analyze import run_analyses, save_analyses
                         results = await loop.run_in_executor(
                             None,
-                            lambda: run_analyses(transcript_text, anthropic_key, analysis_types),
+                            lambda t=transcript_text, types=analysis_types: run_analyses(
+                                t, anthropic_key, types
+                            ),
                         )
                         if results:
                             save_analyses(results, rec_dir, rec.timestamp)
@@ -605,7 +646,7 @@ async def local_recordings():
 @app.get("/api/local/{date}/{timestamp}/transcript")
 async def get_transcript(date: str, timestamp: str):
     config = load_config()
-    path = Path(get_output_dir(config)) / date / f"{timestamp}_transcript.txt"
+    path = _recording_path(Path(get_output_dir(config)), date, timestamp, "_transcript.txt")
     if not path.exists():
         raise HTTPException(404, "Transcript not found")
     return PlainTextResponse(path.read_text(encoding="utf-8"))
@@ -614,7 +655,7 @@ async def get_transcript(date: str, timestamp: str):
 @app.get("/api/local/{date}/{timestamp}/summary")
 async def get_summary(date: str, timestamp: str):
     config = load_config()
-    path = Path(get_output_dir(config)) / date / f"{timestamp}_summary.md"
+    path = _recording_path(Path(get_output_dir(config)), date, timestamp, "_summary.md")
     if not path.exists():
         raise HTTPException(404, "Summary not found")
     return PlainTextResponse(path.read_text(encoding="utf-8"))
@@ -623,7 +664,7 @@ async def get_summary(date: str, timestamp: str):
 @app.get("/api/local/{date}/{timestamp}/audio")
 async def get_audio(date: str, timestamp: str):
     config = load_config()
-    path = Path(get_output_dir(config)) / date / f"{timestamp}.mp3"
+    path = _recording_path(Path(get_output_dir(config)), date, timestamp, ".mp3")
     if not path.exists():
         raise HTTPException(404, "Audio file not found")
     return FileResponse(path, media_type="audio/mpeg", filename=f"{timestamp}.mp3")
@@ -645,7 +686,7 @@ async def chat_recording(date: str, timestamp: str, body: ChatRequest):
         raise HTTPException(400, "No Anthropic API key configured. Add one in Settings.")
 
     out_root = Path(get_output_dir(config))
-    transcript_path = out_root / date / f"{timestamp}_transcript.txt"
+    transcript_path = _recording_path(out_root, date, timestamp, "_transcript.txt")
     if not transcript_path.exists():
         raise HTTPException(404, "Transcript not found. Process this recording first.")
 
@@ -664,7 +705,7 @@ async def chat_recording(date: str, timestamp: str, body: ChatRequest):
 async def get_analyses(date: str, timestamp: str):
     """Get all analysis results for a recording."""
     config = load_config()
-    rec_dir = Path(get_output_dir(config)) / date
+    rec_dir = _recording_path(Path(get_output_dir(config)), date, timestamp, "").parent
     if not rec_dir.exists():
         raise HTTPException(404, "Recording not found")
 
@@ -682,8 +723,8 @@ async def run_analysis(date: str, timestamp: str):
         raise HTTPException(400, "No Anthropic API key configured.")
 
     out_root = Path(get_output_dir(config))
-    rec_dir = out_root / date
-    transcript_path = rec_dir / f"{timestamp}_transcript.txt"
+    transcript_path = _recording_path(out_root, date, timestamp, "_transcript.txt")
+    rec_dir = transcript_path.parent
     if not transcript_path.exists():
         raise HTTPException(404, "Transcript not found. Process this recording first.")
 

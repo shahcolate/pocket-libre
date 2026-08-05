@@ -1,13 +1,11 @@
 """Full sync pipeline. Connect -> Capture -> Transcribe -> Diarize -> Summarize."""
 
-import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
-
 
 console = Console()
 
@@ -91,7 +89,6 @@ async def run_sync(
     model = whisper.load_model(whisper_model)
     result = model.transcribe(str(audio_path), verbose=False)
 
-    full_text = result["text"].strip()
     segments = result.get("segments", [])
 
     console.print(f"[green]Transcribed: {len(segments)} segments[/green]")
@@ -109,7 +106,7 @@ async def run_sync(
     labeled_segments = merge_transcript_with_speakers(segments, speaker_segments)
 
     # Build transcript text
-    from pocket_libre.summarize import format_transcript_for_summary, format_time
+    from pocket_libre.summarize import format_transcript_for_summary
 
     transcript_text = format_transcript_for_summary(labeled_segments)
 
