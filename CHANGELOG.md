@@ -6,11 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [1.1.0] — 2026-09-19
 
-All of the below come from a firmware 1.8 field report by
-[@jmillerhyetech](https://github.com/jmillerhyetech) in
-[#4](https://github.com/shahcolate/pocket-libre/issues/4), with thanks.
+Acts on a firmware 1.8 field report
+([#4](https://github.com/shahcolate/pocket-libre/issues/4)) from
+[@jmillerhyetech](https://github.com/jmillerhyetech), which found that the
+WiFi transfer path was built on an assumption that was never true and could
+leave a device needing a physical power-cycle.
+
+### Added
+
+- A **firmware compatibility table** in the README. Everything except WiFi
+  transfer works on both 1.3.3 and 1.8; WiFi transfer works on neither.
+- A **troubleshooting section**, including how to recover a device that has
+  stopped responding over BLE after a WiFi command.
+- `wifi-discover` reports when a sweep was **incomplete** rather than passing
+  it off as a clean negative.
+
+### Fixed
 
 - **The WiFi handshake used the wrong order on firmware 1.8.** The file is now
   staged *before* the access point is raised, and the credentials are shown
