@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+All of the below come from a firmware 1.8 field report by
+[@jmillerhyetech](https://github.com/jmillerhyetech) in
+[#4](https://github.com/shahcolate/pocket-libre/issues/4), with thanks.
+
+- **The WiFi handshake used the wrong order on firmware 1.8.** The file is now
+  staged *before* the access point is raised, and the credentials are shown
+  before the AP goes up so the join can happen while status polling runs — the
+  AP window is only seconds wide. The documented order never broadcast an SSID
+  on 1.8 and tore down BLE a few seconds later, leaving the device recoverable
+  only by a physical power-cycle.
+- **`wifi-discover` probed for an HTTP server that does not exist.** The device
+  serves files over a framed socket protocol using a `RANGE` verb, not HTTP.
+  The command is now a port sweep that reports what is actually listening.
+- **`wifi-discover` reported home routers as device hits.** `192.168.1.1` and
+  `10.0.0.1` were in the default candidate list, so running the command off the
+  device network confidently returned a router login page. Probing is now
+  gated on holding an address inside the device's `192.168.200.0/24`, and the
+  colliding hosts are gone.
+- **The default AP host was wrong.** It is `192.168.200.1`, not `192.168.4.1`.
+- **Recording durations and sizes were ~4x wrong.** The trailing field of a
+  `MCU&F` listing row is a duration in **seconds**, not a size in kilobytes.
+  The two code paths that read it disagreed with each other; both are fixed,
+  and size is now derived from duration at 32 kbps.
+
+### Changed
+
+- **`wifi-transfer` now requires `--url` and refuses to run without one.**
+  Raising the access point can strand the device, and no endpoint is known, so
+  there is nothing to gain by staging a transfer that cannot complete. It also
+  warns and asks for confirmation before touching the device.
+- Session-key capture instructions now lead with `adb logcat`, which needs no
+  packet capture. The old bug-report route does not work: its snoop log
+  truncates ACL packets to 15 bytes.
+- PROTOCOL.md now marks the WiFi transfer section as partially decoded, gives
+  both the 1.3.3 and 1.8 sequences, and states plainly that the old
+  "serves over HTTP at 192.168.4.1" claim was inference from a BLE-only
+  capture rather than an observation.
+- SECURITY.md documents that the session key is an account identifier which
+  the vendor app writes to the Android system log and sends to a third-party
+  analytics endpoint, and that its first 8 characters are the device's WiFi AP
+  password.
+
+### Breaking
+
+- `Recording.size_kb` is now `Recording.duration_s`, with a new
+  `estimated_bytes` property. The web API's recording rows expose `duration_s`
+  and `estimated_bytes` in place of `size_kb`.
+- `wifi.discover_endpoint()` is replaced by `wifi.diagnose()` and
+  `wifi.scan_ports()`.
+
 ## [1.0.0] — 2026-08-05
 
 First stable release. Everything in the core workflow — capture, transcribe,

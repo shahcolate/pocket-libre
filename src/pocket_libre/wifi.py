@@ -1,22 +1,31 @@
 """WiFi bulk transfer over the device's SoftAP.
 
-The BLE half of this flow is fully decoded (see PROTOCOL.md): the device
-can be told to raise a WiFi access point and stage a file for transfer.
-What is *not* confirmed is the HTTP endpoint it serves that file from —
-that needs someone with a device to probe it once, on the AP.
+The BLE half of this flow is decoded (see PROTOCOL.md): the device can be
+told to raise a WiFi access point and stage a file. What happens *on* that
+access point is not decoded, and this module no longer pretends otherwise.
 
-So this module is in two halves:
+Earlier versions probed for an HTTP server on the AP. Field data from
+firmware 1.8 (https://github.com/shahcolate/pocket-libre/issues/4) showed
+that was a wrong guess inherited from a BLE-only packet capture: with the
+device staged and reporting WIFIS=1 (ready), an exhaustive sweep of all
+65535 TCP ports on the AP found only port 53 open, and strings pulled from
+the vendor app describe a framed socket protocol using a ``RANGE`` verb
+rather than HTTP ``GET``.
 
-  * `download_file` — the transfer client. Give it a URL and it streams
-    the file to disk with progress. Fully implemented.
-  * `discover_endpoint` — walks a candidate space of hosts, ports, and
-    path templates looking for something that serves MP3 bytes. This is
-    what turns the unknown into a known; `pocket-libre wifi-discover`
-    runs it and prints a report worth pasting into an issue.
+So this module is now in three parts:
 
-Once the endpoint is confirmed, set it in config to skip discovery:
+  * ``scan_ports`` / ``diagnose`` — what ``pocket-libre wifi-discover`` runs.
+    It sweeps the AP for listening sockets and prints a report. The open
+    question it exists to answer is whether *anything* listens once the
+    device is staged in the firmware 1.8 order; see PROTOCOL.md.
+  * ``download_file`` — an HTTP client, kept only as an escape hatch for
+    ``--url`` in case some firmware does serve over HTTP. Nothing has been
+    observed to, so do not rely on it.
+  * subnet guards — so we never again report a home router as a device hit.
 
-    pocket-libre config --set wifi.url_template="http://192.168.4.1/{timestamp}.mp3"
+Implementing the real transfer needs two unknowns filled in: the socket
+port, and the RANGE frame format. Neither is guessable, and guessing is
+what produced the bug this module is recovering from.
 """
 
 from __future__ import annotations
@@ -24,67 +33,71 @@ from __future__ import annotations
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
 
-from pocket_libre.protocol import MP3_SYNC_WORD
-
 console = Console()
 
-# ESP32 SoftAP default; the vendor app talks to this address.
-DEFAULT_HOST = "192.168.4.1"
-CANDIDATE_HOSTS = [DEFAULT_HOST, "192.168.1.1", "10.0.0.1"]
-CANDIDATE_PORTS = [80, 8080, 8000, 81, 5000]
+# The Pocket AP hands this out as the gateway, confirmed by DHCP lease on
+# firmware 1.8. (It also appears near WiFi-OTA strings in the vendor app,
+# so it may double as the OTA address — either way it is the device.)
+DEFAULT_HOST = "192.168.200.1"
 
-# Path templates to try, most-likely first. `{date}` and `{timestamp}`
-# are substituted from the recording; `{filename}` is "<timestamp>.mp3".
-CANDIDATE_PATHS = [
-    "/{filename}",
-    "/{date}/{filename}",
-    "/sd/{date}/{filename}",
-    "/record/{date}/{filename}",
-    "/download?file={filename}",
-    "/download?path=/{date}/{filename}",
-    "/file/{filename}",
-    "/api/file/{filename}",
-    "/upload/{filename}",
-    "/{timestamp}",
-]
+# The /24 the device serves. Probing anything outside this is how the old
+# candidate list ended up reporting people's home routers as device hits.
+AP_SUBNET_PREFIX = "192.168.200."
 
-# Paths that may serve an index we can read even without knowing the
-# file naming scheme.
-CANDIDATE_INDEX_PATHS = ["/", "/list", "/files", "/api/list", "/dir", "/index.json"]
+CANDIDATE_HOSTS = [DEFAULT_HOST]
 
 
 @dataclass
-class Probe:
-    """One endpoint attempt and what came back."""
+class PortScan:
+    """The result of sweeping a host for listening TCP sockets."""
 
-    url: str
-    status: int | None = None
-    content_type: str = ""
-    length: int = 0
-    looks_like_mp3: bool = False
-    error: str = ""
-
-    @property
-    def promising(self) -> bool:
-        return self.looks_like_mp3 or (self.status == 200 and self.length > 0)
+    host: str
+    open_ports: list[int] = field(default_factory=list)
+    scanned: int = 0
 
 
 @dataclass
 class DiscoveryReport:
-    """Everything a probe run learned, for printing or filing as an issue."""
+    """Everything a diagnostic run learned, for pasting into an issue."""
 
-    reachable_hosts: list[str] = field(default_factory=list)
-    probes: list[Probe] = field(default_factory=list)
+    local_address: str | None = None
+    on_ap_subnet: bool = False
+    scan: PortScan | None = None
     endpoint: str | None = None
 
-    @property
-    def hits(self) -> list[Probe]:
-        return [p for p in self.probes if p.promising]
+
+def local_address_for(host: str = DEFAULT_HOST) -> str | None:
+    """The local interface address the OS would use to reach `host`.
+
+    Opens an unconnected UDP socket and asks the routing table; no packets
+    are sent. Returns None when there is no route at all.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect((host, 9))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
+def on_ap_subnet(host: str = DEFAULT_HOST) -> tuple[bool, str | None]:
+    """True if this machine holds an address inside the device's /24.
+
+    This is the guard that stops us probing a home LAN. Being routable to
+    the gateway is not enough — a double-NAT setup will happily route
+    192.168.200.1 to something that is not a Pocket.
+    """
+    address = local_address_for(host)
+    if address is None:
+        return False, None
+    return address.startswith(AP_SUBNET_PREFIX), address
 
 
 def is_host_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -96,6 +109,34 @@ def is_host_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def scan_ports(
+    host: str = DEFAULT_HOST,
+    ports: list[int] | None = None,
+    timeout: float = 0.35,
+    workers: int = 256,
+) -> PortScan:
+    """Sweep `host` for listening TCP sockets.
+
+    Defaults to the full range. This is the measurement that matters right
+    now: whether staging the file in the firmware 1.8 order causes a socket
+    to appear that the documented order never raised.
+    """
+    ports = ports if ports is not None else list(range(1, 65536))
+    result = PortScan(host=host, scanned=len(ports))
+
+    def check(port: int) -> int | None:
+        return port if is_host_reachable(host, port, timeout=timeout) else None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for found in pool.map(check, ports):
+            if found is not None:
+                result.open_ports.append(found)
+                console.print(f"  [green]open[/green] {host}:{found}")
+
+    result.open_ports.sort()
+    return result
+
+
 def build_url(template: str, host: str, port: int, date: str, timestamp: str) -> str:
     """Render a path template into a full URL."""
     path = template.format(
@@ -105,73 +146,44 @@ def build_url(template: str, host: str, port: int, date: str, timestamp: str) ->
     return f"http://{authority}{path}"
 
 
-def probe_url(url: str, timeout: float = 5.0, read_bytes: int = 4096) -> Probe:
-    """Fetch the first few KB of a URL and judge whether it looks like audio."""
-    probe = Probe(url=url)
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "pocket-libre"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            probe.status = response.status
-            probe.content_type = response.headers.get("Content-Type", "")
-            head = response.read(read_bytes)
-            probe.length = int(response.headers.get("Content-Length") or len(head))
-            probe.looks_like_mp3 = (
-                MP3_SYNC_WORD in head[:512]
-                or head[:3] == b"ID3"
-                or "audio" in probe.content_type.lower()
-            )
-    except urllib.error.HTTPError as e:
-        probe.status = e.code
-        probe.error = f"HTTP {e.code}"
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        probe.error = str(e)
-    return probe
-
-
-def discover_endpoint(
-    date: str,
-    timestamp: str,
-    hosts: list[str] | None = None,
+def diagnose(
+    host: str = DEFAULT_HOST,
     ports: list[int] | None = None,
-    timeout: float = 3.0,
+    require_ap_subnet: bool = True,
 ) -> DiscoveryReport:
-    """Probe the candidate space for an endpoint serving this recording.
+    """Sweep the device AP and report what is listening.
 
-    Returns a report even when nothing is found — the negative results are
-    what make a bug report actionable.
+    Returns a report even when nothing is found — a confirmed negative is
+    the useful result here, because it would mean the transfer listener is
+    never raised on this firmware and no client we could write would help.
     """
     report = DiscoveryReport()
-    hosts = hosts or CANDIDATE_HOSTS
-    ports = ports or CANDIDATE_PORTS
+    joined, address = on_ap_subnet(host)
+    report.local_address = address
+    report.on_ap_subnet = joined
 
-    live: list[tuple[str, int]] = []
-    for host in hosts:
-        for port in ports:
-            if is_host_reachable(host, port, timeout=1.0):
-                live.append((host, port))
-                if host not in report.reachable_hosts:
-                    report.reachable_hosts.append(host)
-                console.print(f"  [green]open[/green] {host}:{port}")
-
-    if not live:
+    if address is None:
         console.print(
-            "[yellow]No HTTP port answered. Are you joined to the device's "
-            "WiFi network?[/yellow]"
+            f"[yellow]No route to {host}. Join the device's WiFi network "
+            f"first.[/yellow]"
         )
-        return report
+        if require_ap_subnet:
+            return report
+    elif not joined:
+        console.print(
+            f"[yellow]This machine is {address}, which is outside the device "
+            f"subnet {AP_SUBNET_PREFIX}0/24.[/yellow]\n"
+            f"[yellow]Something else is answering for {host} — probing it "
+            f"would report your own network, not the device.[/yellow]"
+        )
+        if require_ap_subnet:
+            console.print("[dim]Pass --force to probe anyway.[/dim]")
+            return report
+    else:
+        console.print(f"[dim]On the device subnet as {address}.[/dim]")
 
-    for host, port in live:
-        for template in CANDIDATE_PATHS + CANDIDATE_INDEX_PATHS:
-            url = build_url(template, host, port, date, timestamp)
-            probe = probe_url(url, timeout=timeout)
-            report.probes.append(probe)
-            if probe.looks_like_mp3:
-                console.print(f"  [bold green]MP3![/bold green] {url}")
-                report.endpoint = url
-                return report
-            if probe.promising:
-                console.print(f"  [cyan]{probe.status}[/cyan] {url} ({probe.length}B)")
-
+    console.print(f"[dim]Sweeping {host} for listening sockets...[/dim]")
+    report.scan = scan_ports(host, ports=ports)
     return report
 
 
@@ -187,6 +199,9 @@ def download_file(
     Writes to a temporary file and moves it into place only on success, so
     an interrupted transfer never leaves a truncated .mp3 that later runs
     would mistake for a completed download.
+
+    No firmware has been observed serving files over HTTP; this exists for
+    the `--url` escape hatch only.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

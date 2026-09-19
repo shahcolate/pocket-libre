@@ -20,6 +20,7 @@ from rich.console import Console
 
 from pocket_libre.protocol import (
     AUDIO_NOTIFY_CHAR,
+    BYTES_PER_SECOND,
     CMD_NOTIFY_CHAR,
     CMD_PREFIX,
     CMD_WRITE_CHAR,
@@ -45,15 +46,23 @@ class Recording:
     """A recording stored on the device."""
     date: str          # e.g. "2026-03-28"
     timestamp: str     # e.g. "20260328001919"
-    size_kb: int       # file size in KB from LIST response
+    duration_s: int    # recording length in SECONDS, from the LIST response
 
     @property
     def filename(self) -> str:
         return f"{self.timestamp}.mp3"
 
+    @property
+    def estimated_bytes(self) -> int:
+        """Approximate size on disk, derived from duration at 32 kbps."""
+        return max(self.duration_s, 0) * BYTES_PER_SECOND
+
     def __str__(self) -> str:
-        mins = self.size_kb // 60 if self.size_kb > 0 else 0
-        return f"{self.date}/{self.timestamp} ({self.size_kb} KB, ~{mins}m)"
+        mins, secs = divmod(max(self.duration_s, 0), 60)
+        return (
+            f"{self.date}/{self.timestamp} "
+            f"({mins}m{secs:02d}s, ~{self.estimated_bytes:,} bytes)"
+        )
 
 
 class PocketCommander:
@@ -206,6 +215,7 @@ class PocketCommander:
             if not r.startswith(f"{RSP_PREFIX}F&"):
                 continue
             # MCU&F&2026-03-28&20260328001919&6222
+            # The trailing field is a duration in seconds (see protocol.py).
             parts = r.split("&")
             if len(parts) >= 5:
                 rec_date = parts[2]
@@ -216,8 +226,8 @@ class PocketCommander:
                         f"{rec_date}/{timestamp}[/yellow]"
                     )
                     continue
-                size_kb = int(parts[4]) if parts[4].isdigit() else 0
-                recordings.append(Recording(rec_date, timestamp, size_kb))
+                duration_s = int(parts[4]) if parts[4].isdigit() else 0
+                recordings.append(Recording(rec_date, timestamp, duration_s))
         return recordings
 
     async def list_all_recordings(self) -> list[Recording]:
@@ -409,8 +419,8 @@ async def download_with_retry(
                     data = data[mp3_start:]
 
                 # Validate: check we got a reasonable amount of data
-                if recording.size_kb > 0:
-                    expected = recording.size_kb * 1024
+                if recording.duration_s > 0:
+                    expected = recording.estimated_bytes
                     if len(data) < expected * 0.5:
                         console.print(
                             f"[yellow]Short transfer: {len(data):,} bytes "

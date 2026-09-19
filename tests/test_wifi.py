@@ -1,4 +1,11 @@
-"""WiFi endpoint discovery and HTTP transfer, against a local stub server."""
+"""WiFi AP diagnostics, subnet guards, and the HTTP escape hatch.
+
+Note what these tests can and cannot show. The port-scan and subnet-guard
+tests exercise real logic. The HTTP tests run against a local stub server,
+and no Pocket firmware has been observed serving files over HTTP — they
+cover the `--url` escape hatch, not the device. Passing them says nothing
+about whether WiFi transfer works on hardware.
+"""
 
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -6,11 +13,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from pocket_libre.wifi import (
+    AP_SUBNET_PREFIX,
+    CANDIDATE_HOSTS,
+    DEFAULT_HOST,
     build_url,
-    discover_endpoint,
+    diagnose,
     download_file,
     is_host_reachable,
-    probe_url,
+    on_ap_subnet,
+    scan_ports,
 )
 
 MP3_BODY = b"\xff\xf3\x48\xc4" + b"audio-payload" * 400
@@ -88,69 +99,117 @@ def test_closed_port_not_reachable():
     assert not is_host_reachable("127.0.0.1", 1, timeout=0.5)
 
 
-# ── Probing ─────────────────────────────────────
+# ── Host defaults ───────────────────────────────
 
 
-def test_probe_identifies_mp3(port):
-    probe = probe_url(f"http://127.0.0.1:{port}/20260328001919.mp3")
-    assert probe.status == 200
-    assert probe.looks_like_mp3
-    assert probe.promising
+def test_default_host_is_the_device_gateway():
+    """Firmware 1.8 DHCP hands out 192.168.200.1, not the ESP32 default."""
+    assert DEFAULT_HOST == "192.168.200.1"
 
 
-def test_probe_html_is_not_mp3(port):
-    probe = probe_url(f"http://127.0.0.1:{port}/index.html")
-    assert probe.status == 200
-    assert not probe.looks_like_mp3
+def test_candidate_hosts_exclude_common_home_gateways():
+    """Regression: probing these reported people's own routers as hits.
+
+    See https://github.com/shahcolate/pocket-libre/issues/4 section 8.
+    """
+    assert "192.168.1.1" not in CANDIDATE_HOSTS
+    assert "10.0.0.1" not in CANDIDATE_HOSTS
 
 
-def test_probe_404_is_not_promising(port):
-    probe = probe_url(f"http://127.0.0.1:{port}/missing")
-    assert probe.status == 404
-    assert not probe.promising
+# ── Port scanning ───────────────────────────────
 
 
-def test_probe_empty_body_is_not_promising(port):
-    assert not probe_url(f"http://127.0.0.1:{port}/empty").promising
+def test_scan_finds_a_listening_port(port):
+    result = scan_ports("127.0.0.1", ports=[port], timeout=2.0)
+    assert result.open_ports == [port]
+    assert result.scanned == 1
 
 
-def test_probe_unreachable_records_error():
-    probe = probe_url("http://127.0.0.1:1/whatever", timeout=0.5)
-    assert probe.error
-    assert not probe.promising
+def test_scan_reports_nothing_when_closed():
+    result = scan_ports("127.0.0.1", ports=[1], timeout=0.5)
+    assert result.open_ports == []
+    assert result.scanned == 1
 
 
-# ── Discovery ───────────────────────────────────
+def test_scan_returns_sorted_ports(port):
+    result = scan_ports("127.0.0.1", ports=[port, 1], timeout=1.0)
+    assert result.open_ports == sorted(result.open_ports)
 
 
-def test_discovery_finds_the_mp3_endpoint(port):
-    report = discover_endpoint(
-        date="2026-03-28", timestamp="20260328001919",
-        hosts=["127.0.0.1"], ports=[port],
+# ── Subnet guard ────────────────────────────────
+
+
+def test_on_ap_subnet_true_inside_the_device_range(monkeypatch):
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
     )
-    assert report.endpoint == f"http://127.0.0.1:{port}/20260328001919.mp3"
+    joined, address = on_ap_subnet()
+    assert joined
+    assert address == "192.168.200.2"
 
 
-def test_discovery_reports_reachable_hosts(port):
-    report = discover_endpoint(
-        "2026-03-28", "20260328001919", hosts=["127.0.0.1"], ports=[port]
+def test_on_ap_subnet_false_on_a_home_lan(monkeypatch):
+    """A routable 192.168.200.1 through double-NAT is not the device."""
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.1.14"
     )
-    assert "127.0.0.1" in report.reachable_hosts
+    joined, address = on_ap_subnet()
+    assert not joined
+    assert address == "192.168.1.14"
 
 
-def test_discovery_returns_report_when_nothing_listens():
-    report = discover_endpoint(
-        "2026-03-28", "20260328001919", hosts=["127.0.0.1"], ports=[1]
+def test_on_ap_subnet_false_with_no_route(monkeypatch):
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: None
     )
-    assert report.endpoint is None
-    assert report.reachable_hosts == []
+    joined, address = on_ap_subnet()
+    assert not joined
+    assert address is None
 
 
-def test_discovery_finds_nothing_for_unknown_recording(port):
-    """A recording the server doesn't have must not yield a false positive."""
-    report = discover_endpoint(
-        "2026-01-01", "99999999999999", hosts=["127.0.0.1"], ports=[port]
+def test_ap_subnet_prefix_matches_default_host():
+    assert DEFAULT_HOST.startswith(AP_SUBNET_PREFIX)
+
+
+# ── Diagnose ────────────────────────────────────
+
+
+def test_diagnose_refuses_to_sweep_off_subnet(monkeypatch, port):
+    """The guard that stops us probing a home router."""
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.1.14"
     )
+    report = diagnose(host="127.0.0.1", ports=[port])
+    assert report.scan is None
+    assert not report.on_ap_subnet
+
+
+def test_diagnose_sweeps_when_forced(monkeypatch, port):
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.1.14"
+    )
+    report = diagnose(host="127.0.0.1", ports=[port], require_ap_subnet=False)
+    assert report.scan is not None
+    assert report.scan.open_ports == [port]
+
+
+def test_diagnose_sweeps_when_on_subnet(monkeypatch, port):
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
+    )
+    report = diagnose(host="127.0.0.1", ports=[port])
+    assert report.on_ap_subnet
+    assert report.scan.open_ports == [port]
+
+
+def test_diagnose_reports_empty_sweep_without_claiming_failure(monkeypatch):
+    """A confirmed negative is a result, not an error."""
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
+    )
+    report = diagnose(host="127.0.0.1", ports=[1])
+    assert report.scan is not None
+    assert report.scan.open_ports == []
     assert report.endpoint is None
 
 

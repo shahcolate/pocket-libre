@@ -213,8 +213,9 @@ async def device_recordings():
                     {
                         "date": r.date,
                         "timestamp": r.timestamp,
-                        "size_kb": r.size_kb,
-                        "duration_estimate": f"{r.size_kb * 1024 // 4000 // 60}m{r.size_kb * 1024 // 4000 % 60:02d}s" if r.size_kb > 0 else "0m00s",
+                        "duration_s": r.duration_s,
+                        "estimated_bytes": r.estimated_bytes,
+                        "duration_estimate": f"{max(r.duration_s, 0) // 60}m{max(r.duration_s, 0) % 60:02d}s",
                     }
                     for r in all_recs
                 ]
@@ -248,7 +249,7 @@ async def download_recording(date: str, timestamp: str):
                         yield _sse({"step": "error", "message": "Authentication failed."})
                         return
 
-                    rec = Recording(date=date, timestamp=timestamp, size_kb=0)
+                    rec = Recording(date=date, timestamp=timestamp, duration_s=0)
                     yield _sse({"step": "download", "message": f"Downloading {date}/{timestamp}...", "progress": 0})
 
                     queue = asyncio.Queue()
@@ -330,7 +331,7 @@ async def process_recording(date: str, timestamp: str):
                             yield _sse({"step": "error", "message": "Auth failed."})
                             return
 
-                        rec = Recording(date=date, timestamp=timestamp, size_kb=0)
+                        rec = Recording(date=date, timestamp=timestamp, duration_s=0)
                         yield _sse({"step": "download", "message": "Downloading...", "progress": 0})
 
                         queue = asyncio.Queue()

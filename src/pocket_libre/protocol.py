@@ -95,6 +95,17 @@ WIFI_STATUS_READY = 1      # Ready for transfer
 WIFI_STATUS_STARTING = 2   # AP starting up
 WIFI_STATUS_CONNECTING = 3 # AP created, waiting for client
 
+# Recording bitrate, in bytes per second (32 kbps MP3).
+#
+# The MCU&F listing field is a DURATION IN SECONDS, not a size in KB as
+# this project assumed before firmware 1.8 field reports. Multiply by this
+# to estimate the file size on disk. Confirmed twice against hardware in
+# https://github.com/shahcolate/pocket-libre/issues/4:
+#   25 s     -> 101,996 bytes downloaded (ffprobe duration 25.499 s)
+#   1663 s   -> MCU&U&6653128 bytes reported at staging
+# Both land on 4000 B/s, exactly 32 kbps.
+BYTES_PER_SECOND = 4000
+
 
 # ──────────────────────────────────────────────
 # All notify characteristics (for auto-detection)
