@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pocket-libre"
-version = "1.0.0"
+version = "1.1.0"
 description = "Liberate your Pocket AI recorder from the cloud. Local-first BLE audio capture and transcription."
 readme = "README.md"
 license = {text = "MIT"}

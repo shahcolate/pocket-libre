@@ -46,9 +46,37 @@ You still get timestamped, speaker-labeled transcripts.
 ## Requirements
 
 - Python 3.10 or newer
-- A Pocket recorder (tested on `PKT01`, firmware 1.3.3)
+- A Pocket recorder (`PKT01`; see [firmware compatibility](#firmware-compatibility))
 - Bluetooth LE support
 - The device's 16-character session key (see [below](#getting-your-session-key))
+
+## Firmware compatibility
+
+Firmware matters more than you would expect — the device's WiFi behaviour
+differs enough between versions that a sequence confirmed on one can strand
+another. Check yours with `pocket-libre status`.
+
+| | 1.3.3 | 1.8 |
+|---|---|---|
+| Scan, connect, authenticate | Works | Works |
+| Status, storage, file listing | Works | Works |
+| BLE download (`download`, `sync`, `watch`) | Works | Works |
+| Transcribe, diarize, summarize, web UI | Works | Works |
+| WiFi AP handshake | Works | Works, but [needs a different order](PROTOCOL.md#wifi-transfer-fast--partially-decoded) |
+| WiFi file transfer | Never confirmed | **No endpoint found** |
+
+**Everything except WiFi transfer works on both.** The BLE path is slower
+(3–4 KB/s, so a long recording takes hours) but it is reliable, and it is what
+`download`, `sync` and `watch` use.
+
+**WiFi transfer does not currently work on any firmware.** The BLE handshake
+that raises the access point is decoded, but nothing has been found listening
+on the AP once it is up — see [#4](https://github.com/shahcolate/pocket-libre/issues/4)
+and the [WiFi transfer](#wifi-transfer) section. On firmware 1.8, raising the
+AP the wrong way can leave the device needing a physical power-cycle.
+
+Other firmware versions are untested. If you have one, `pocket-libre status`
+and `pocket-libre explore` output would be genuinely useful in an issue.
 
 ## Install
 
@@ -249,6 +277,44 @@ pocket-libre wifi-discover
 Share both outputs in [an issue](https://github.com/shahcolate/pocket-libre/issues).
 A confirmed "nothing listens" is as valuable as a hit: it would mean fast
 transfer is unreachable on this firmware by any client we could write.
+
+## Troubleshooting
+
+**The device stopped responding over BLE after a WiFi command.** This is the
+firmware 1.8 trap: `APP&WIFIO` sent in the wrong order tears down BLE, and
+`APP&WIFIC` cannot recover it because BLE is already gone. **Power-cycle the
+device physically** — hold the power button until it switches off, then back
+on. It will start advertising again. Nothing on the device is lost;
+recordings are on its internal storage.
+
+**`pocket-libre scan` finds nothing.** Make sure the device is on and not
+connected to the vendor app — it accepts one BLE connection at a time, so
+force-quit the phone app first. On Linux, BLE scanning usually needs
+`bluetoothd` running and your user in the `bluetooth` group.
+
+**Authentication fails.** The session key is per *account*, not per device, so
+a key captured from one phone works for every device on that account — but it
+changes if you sign in as someone else. Re-capture it with the
+[logcat method](#getting-your-session-key). Keys are 16 characters.
+
+**Downloads are slow.** That is expected: BLE runs at 3–4 KB/s, so an hour of
+audio takes roughly two hours to pull. `pocket-libre watch` runs in the
+background and syncs new recordings as they appear, which is usually a better
+fit than waiting on a single download.
+
+**A download came back short.** The device occasionally drops a transfer.
+`download` retries on its own; if it keeps failing, move the device closer and
+close the vendor app. Partial files are never left behind under the final
+name.
+
+**Transcription is slow or runs out of memory.** Whisper model size is the
+lever: `pocket-libre config --set transcribe.model=base` is much lighter than
+`large`. Diarization needs PyTorch and a HuggingFace token; without them the
+pipeline falls back to a heuristic speaker split.
+
+**Something else.** Open an issue with the output of `pocket-libre status` and
+your firmware version — and scrub your session key, which is also your
+device's WiFi password.
 
 ## Status
 
