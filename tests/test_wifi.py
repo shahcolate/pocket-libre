@@ -7,6 +7,7 @@ cover the `--url` escape hatch, not the device. Passing them says nothing
 about whether WiFi transfer works on hardware.
 """
 
+import errno
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -16,12 +17,15 @@ from pocket_libre.wifi import (
     AP_SUBNET_PREFIX,
     CANDIDATE_HOSTS,
     DEFAULT_HOST,
+    ScanResourceError,
+    _safe_worker_count,
     build_url,
     diagnose,
     download_file,
     is_host_reachable,
     on_ap_subnet,
     scan_ports,
+    subnet_prefix,
 )
 
 MP3_BODY = b"\xff\xf3\x48\xc4" + b"audio-payload" * 400
@@ -195,7 +199,7 @@ def test_diagnose_sweeps_when_forced(monkeypatch, port):
 
 def test_diagnose_sweeps_when_on_subnet(monkeypatch, port):
     monkeypatch.setattr(
-        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "127.0.0.1"
     )
     report = diagnose(host="127.0.0.1", ports=[port])
     assert report.on_ap_subnet
@@ -205,12 +209,94 @@ def test_diagnose_sweeps_when_on_subnet(monkeypatch, port):
 def test_diagnose_reports_empty_sweep_without_claiming_failure(monkeypatch):
     """A confirmed negative is a result, not an error."""
     monkeypatch.setattr(
-        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "127.0.0.1"
     )
     report = diagnose(host="127.0.0.1", ports=[1])
     assert report.scan is not None
     assert report.scan.open_ports == []
-    assert report.endpoint is None
+    assert report.scan.reliable
+
+
+def test_diagnose_guard_follows_the_host_argument(monkeypatch, port):
+    """--host on another subnet must not be refused by a hardcoded prefix.
+
+    Regression: the guard compared against the default 192.168.200.0/24
+    regardless of --host, so any other device address was unusable without
+    --force.
+    """
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "10.1.2.3"
+    )
+    report = diagnose(host="10.1.2.9", ports=[port])
+    assert report.on_ap_subnet
+    assert report.scan is not None
+
+
+# ── Subnet prefixes ─────────────────────────────
+
+
+def test_subnet_prefix_derives_the_slash_24():
+    assert subnet_prefix("192.168.200.1") == "192.168.200."
+    assert subnet_prefix("10.1.2.9") == "10.1.2."
+
+
+def test_subnet_prefix_rejects_malformed_hosts():
+    assert subnet_prefix("not-an-ip") == ""
+    assert subnet_prefix("192.168.1") == ""
+
+
+def test_malformed_host_is_never_treated_as_joined(monkeypatch):
+    monkeypatch.setattr(
+        "pocket_libre.wifi.local_address_for", lambda host=DEFAULT_HOST: "192.168.200.2"
+    )
+    joined, address = on_ap_subnet("pocket.local")
+    assert not joined
+    assert address == "192.168.200.2"
+
+
+# ── Scan reliability ────────────────────────────
+
+
+def test_fd_exhaustion_raises_rather_than_reporting_closed(monkeypatch):
+    """Descriptor exhaustion must not look like a closed port.
+
+    This is the failure that would silently poison the negative result the
+    command exists to produce.
+    """
+    def boom(*args, **kwargs):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr("pocket_libre.wifi.socket.create_connection", boom)
+    with pytest.raises(ScanResourceError):
+        is_host_reachable("127.0.0.1", 80, timeout=0.5)
+
+
+def test_scan_marks_itself_unreliable_on_fd_exhaustion(monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr("pocket_libre.wifi.socket.create_connection", boom)
+    result = scan_ports("127.0.0.1", ports=[80, 443], timeout=0.5)
+    assert not result.reliable
+    assert result.error
+    assert result.open_ports == []
+
+
+def test_ordinary_refusal_still_reads_as_closed(monkeypatch):
+    """Only descriptor exhaustion is special; a refused connection is not."""
+    def refused(*args, **kwargs):
+        raise OSError(errno.ECONNREFUSED, "Connection refused")
+
+    monkeypatch.setattr("pocket_libre.wifi.socket.create_connection", refused)
+    assert not is_host_reachable("127.0.0.1", 80, timeout=0.5)
+    result = scan_ports("127.0.0.1", ports=[80], timeout=0.5)
+    assert result.reliable
+    assert result.open_ports == []
+
+
+def test_worker_count_stays_inside_the_descriptor_budget():
+    assert _safe_worker_count(1024) >= 8
+    assert _safe_worker_count(4) <= 4
 
 
 # ── Download ────────────────────────────────────

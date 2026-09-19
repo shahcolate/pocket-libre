@@ -30,6 +30,7 @@ what produced the bug this module is recovering from.
 
 from __future__ import annotations
 
+import errno
 import socket
 import urllib.error
 import urllib.request
@@ -48,7 +49,8 @@ DEFAULT_HOST = "192.168.200.1"
 
 # The /24 the device serves. Probing anything outside this is how the old
 # candidate list ended up reporting people's home routers as device hits.
-AP_SUBNET_PREFIX = "192.168.200."
+# Derived from DEFAULT_HOST so the two cannot drift apart.
+AP_SUBNET_PREFIX = DEFAULT_HOST.rsplit(".", 1)[0] + "."
 
 CANDIDATE_HOSTS = [DEFAULT_HOST]
 
@@ -60,6 +62,8 @@ class PortScan:
     host: str
     open_ports: list[int] = field(default_factory=list)
     scanned: int = 0
+    reliable: bool = True
+    error: str = ""
 
 
 @dataclass
@@ -69,7 +73,6 @@ class DiscoveryReport:
     local_address: str | None = None
     on_ap_subnet: bool = False
     scan: PortScan | None = None
-    endpoint: str | None = None
 
 
 def local_address_for(host: str = DEFAULT_HOST) -> str | None:
@@ -87,39 +90,100 @@ def local_address_for(host: str = DEFAULT_HOST) -> str | None:
         return None
 
 
+def subnet_prefix(host: str) -> str:
+    """The /24 prefix of `host`, e.g. "192.168.200." — "" if unparseable."""
+    octets = host.split(".")
+    if len(octets) != 4:
+        return ""
+    return ".".join(octets[:3]) + "."
+
+
 def on_ap_subnet(host: str = DEFAULT_HOST) -> tuple[bool, str | None]:
-    """True if this machine holds an address inside the device's /24.
+    """True if this machine holds an address inside `host`'s /24.
 
     This is the guard that stops us probing a home LAN. Being routable to
     the gateway is not enough — a double-NAT setup will happily route
     192.168.200.1 to something that is not a Pocket.
+
+    The prefix is derived from `host` rather than hardcoded, so pointing
+    --host at a device on a different subnet still works.
     """
     address = local_address_for(host)
     if address is None:
         return False, None
-    return address.startswith(AP_SUBNET_PREFIX), address
+    prefix = subnet_prefix(host)
+    if not prefix:
+        return False, address
+    return address.startswith(prefix), address
+
+
+# Running out of file descriptors looks exactly like a closed port at the
+# socket layer. That would be a silent, confident lie from a command whose
+# whole purpose is to report a trustworthy negative, so it is tracked apart.
+_FD_EXHAUSTION_ERRNOS = frozenset(
+    e for e in (
+        getattr(errno, "EMFILE", None),
+        getattr(errno, "ENFILE", None),
+        getattr(errno, "ENOBUFS", None),
+    ) if e is not None
+)
+
+
+class ScanResourceError(RuntimeError):
+    """The scanner ran out of file descriptors, so results are unreliable."""
 
 
 def is_host_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
-    """True if a TCP connection to host:port completes."""
+    """True if a TCP connection to host:port completes.
+
+    Raises ScanResourceError if the local process is out of descriptors,
+    rather than reporting the port closed.
+    """
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except OSError:
+    except OSError as e:
+        if e.errno in _FD_EXHAUSTION_ERRNOS:
+            raise ScanResourceError(
+                f"Out of file descriptors while probing port {port}"
+            ) from e
         return False
+
+
+def _safe_worker_count(requested: int) -> int:
+    """Cap concurrency well inside the process descriptor limit.
+
+    macOS commonly ships a soft limit of 256, which a naive 256-way sweep
+    walks straight into.
+    """
+    try:
+        import resource
+
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ImportError, OSError, ValueError):
+        return min(requested, 64)
+    if soft in (-1, getattr(resource, "RLIM_INFINITY", -1)):
+        return requested
+    # Leave half the budget for everything else the process is doing, but
+    # never scale *up* past what the caller asked for.
+    return min(requested, max(8, soft // 2))
 
 
 def scan_ports(
     host: str = DEFAULT_HOST,
     ports: list[int] | None = None,
     timeout: float = 0.35,
-    workers: int = 256,
+    workers: int = 128,
 ) -> PortScan:
     """Sweep `host` for listening TCP sockets.
 
     Defaults to the full range. This is the measurement that matters right
     now: whether staging the file in the firmware 1.8 order causes a socket
     to appear that the documented order never raised.
+
+    An empty result is only meaningful if the sweep actually completed, so
+    descriptor exhaustion sets `reliable = False` instead of quietly
+    reporting every port closed.
     """
     ports = ports if ports is not None else list(range(1, 65536))
     result = PortScan(host=host, scanned=len(ports))
@@ -127,11 +191,15 @@ def scan_ports(
     def check(port: int) -> int | None:
         return port if is_host_reachable(host, port, timeout=timeout) else None
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for found in pool.map(check, ports):
-            if found is not None:
-                result.open_ports.append(found)
-                console.print(f"  [green]open[/green] {host}:{found}")
+    with ThreadPoolExecutor(max_workers=_safe_worker_count(workers)) as pool:
+        try:
+            for found in pool.map(check, ports):
+                if found is not None:
+                    result.open_ports.append(found)
+                    console.print(f"  [green]open[/green] {host}:{found}")
+        except ScanResourceError as e:
+            result.reliable = False
+            result.error = str(e)
 
     result.open_ports.sort()
     return result
@@ -172,7 +240,7 @@ def diagnose(
     elif not joined:
         console.print(
             f"[yellow]This machine is {address}, which is outside the device "
-            f"subnet {AP_SUBNET_PREFIX}0/24.[/yellow]\n"
+            f"subnet {subnet_prefix(host) or host}0/24.[/yellow]\n"
             f"[yellow]Something else is answering for {host} — probing it "
             f"would report your own network, not the device.[/yellow]"
         )

@@ -958,6 +958,12 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
     from pocket_libre.wifi import DEFAULT_HOST, diagnose
 
     target = host or DEFAULT_HOST
+    if start_port > end_port:
+        raise click.UsageError(
+            f"--start-port ({start_port}) is above --end-port ({end_port})."
+        )
+    if end_port < 1 or start_port > 65535:
+        raise click.UsageError("Port range must fall within 1-65535.")
     ports = list(range(max(start_port, 1), min(end_port, 65535) + 1))
 
     console.print(f"[bold]Sweeping {target} ({len(ports):,} ports)...[/bold]\n")
@@ -979,6 +985,19 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
             "transfer listener and a genuine finding. Please report it:\n"
             "  https://github.com/shahcolate/pocket-libre/issues",
             border_style="green",
+        ))
+    elif not report.scan.reliable:
+        # An incomplete sweep must never be reported as a clean negative:
+        # the whole value of this command is that an empty result can be
+        # trusted.
+        console.print(Panel(
+            f"[bold red]Sweep incomplete — do not report this as a "
+            f"result.[/bold red]\n\n"
+            f"{report.scan.error}\n\n"
+            "The scan ran out of file descriptors, so ports may be reported\n"
+            "closed when they are not. Raise the limit and try again:\n"
+            "  ulimit -n 4096",
+            border_style="red",
         ))
     else:
         console.print(Panel(
@@ -1095,15 +1114,39 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
                 "back.[/dim]",
                 border_style="yellow",
             ))
-            click.confirm("  Ready to raise the access point?", default=True,
-                          abort=True)
+            # Off the event loop: this blocks on human input while a BLE
+            # connection is open, and the loop still needs to service
+            # disconnect callbacks and keepalives while it waits.
+            try:
+                proceed = await asyncio.to_thread(
+                    click.confirm, "  Ready to raise the access point?",
+                    default=True,
+                )
+            except click.Abort:
+                proceed = False
+            if not proceed:
+                # The file is already staged, so leave the device clean
+                # rather than parked in WiFi mode.
+                await cmd.wifi_cleanup()
+                raise click.Abort()
 
             console.print("[dim]Raising the access point — join it now...[/dim]")
-            await cmd.wifi_enable()
 
-            ready = await cmd.wifi_wait_ready(timeout=90.0)
-            if ready:
-                await cmd.wifi_begin_transfer()
+            # This is the command the firmware 1.8 report found can tear
+            # down BLE outright. When that happens bleak raises from the
+            # middle of the poll, and an unhandled traceback here would
+            # replace the one message the user actually needs: that the
+            # device may now need a physical power-cycle.
+            try:
+                await cmd.wifi_enable()
+                ready = await cmd.wifi_wait_ready(timeout=90.0)
+                if ready:
+                    await cmd.wifi_begin_transfer()
+            except click.Abort:
+                raise
+            except Exception as e:
+                console.print(f"[yellow]Lost the BLE link: {e}[/yellow]")
+                return size, False
             return size, ready
 
     async def _cleanup():
@@ -1121,7 +1164,8 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
         raise click.ClickException(
             "The access point never reported ready (WIFIS=1).\n"
             "If the device has also stopped advertising over BLE, it needs a "
-            "physical power-cycle."
+            "physical power-cycle —\n"
+            "APP&WIFIC cannot recover it once BLE is gone."
         )
 
     if url_template.startswith("/"):

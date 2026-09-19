@@ -156,7 +156,7 @@ isn't scanning flat out all day.
 | `transcribe` | Transcribe locally with Whisper |
 | `convert` | Convert raw audio to WAV |
 | `wifi-transfer` | Download over WiFi instead of BLE ([see caveat](#wifi-transfer)) |
-| `wifi-discover` | Probe for the device's HTTP endpoint |
+| `wifi-discover` | Sweep the device's WiFi AP for listening sockets |
 | `explore` | Dump GATT services and characteristics |
 | `sniff` | Subscribe to all BLE notifications |
 | `probe` | Probe write characteristics |
