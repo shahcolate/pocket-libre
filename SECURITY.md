@@ -37,6 +37,27 @@ live concern if you display summaries anywhere else.
 become filenames, so they are validated before use. A spoofed or malfunctioning
 peer cannot steer writes outside the output directory.
 
+**Your session key is an account identifier, and the vendor app logs it.**
+This is a property of the vendor's ecosystem rather than of this project, but
+it affects anyone using either, so it is worth stating plainly. Reported in
+[#4](https://github.com/shahcolate/pocket-libre/issues/4):
+
+- The session key is the **first 16 characters of the account's `distinct_id`**,
+  so it identifies an *account*, not a device — contrary to what PROTOCOL.md
+  previously implied. One key may cover several devices, and it does not change
+  when a device does.
+- The vendor app writes that `distinct_id` to the Android system log, where any
+  app holding `READ_LOGS` — and anyone with `adb` — can read it, and transmits
+  it to a third-party analytics endpoint on every event.
+- The **first 8 characters of the same value are your device's WiFi AP
+  password**. So the credential protecting the device's access point is
+  derived from a value that is routinely logged and sent off-device.
+
+Nothing in this project can change that. The practical consequence is that you
+should not treat the session key as a secret that only you hold, and should not
+assume the device's WiFi AP is protected against someone who has seen your
+account ID.
+
 **Not in scope:** a compromised local machine, a malicious Anthropic or
 HuggingFace API endpoint, physical access to an unlocked device, or someone in
 BLE range with your session key.

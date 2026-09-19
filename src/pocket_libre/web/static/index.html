@@ -338,13 +338,13 @@ async function fetchDeviceRecordings() {
       return;
     }
 
-    let html = `<table><thead><tr><th>Date</th><th>Timestamp</th><th>Size</th><th>Duration</th><th>Actions</th></tr></thead><tbody>`;
+    let html = `<table><thead><tr><th>Date</th><th>Timestamp</th><th>Duration</th><th>~Size</th><th>Actions</th></tr></thead><tbody>`;
     for (const rec of recs) {
       html += `<tr>
         <td>${rec.date}</td>
         <td>${rec.timestamp}</td>
-        <td>${rec.size_kb} KB</td>
         <td>${rec.duration_estimate}</td>
+        <td>${(rec.estimated_bytes / 1024).toLocaleString(undefined, {maximumFractionDigits: 0})} KB</td>
         <td>
           <button class="btn" onclick="startDownload('${rec.date}','${rec.timestamp}')">Download</button>
           <button class="btn primary" onclick="startProcess('${rec.date}','${rec.timestamp}')">Download & Process</button>

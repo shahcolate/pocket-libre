@@ -78,7 +78,12 @@ The 16-character session key authenticates the connection. Capture yours from an
 << MCU&LIST&020
 ```
 
-Format: `MCU&F&<date>&<timestamp>&<size_kb>`
+Format: `MCU&F&<date>&<timestamp>&<duration_seconds>`
+
+> The trailing field is a **duration in seconds**, not a size in kilobytes.
+> This was mislabelled here until firmware 1.8 field data corrected it
+> ([#4](https://github.com/shahcolate/pocket-libre/issues/4)). Multiply by
+> 4000 B/s (32 kbps) to estimate the size on disk.
 Ends with: `MCU&LIST&<count>` (zero-padded)
 
 ### BLE File Transfer
@@ -91,50 +96,92 @@ Ends with: `MCU&LIST&<count>` (zero-padded)
 
 Throughput: ~3-4 KB/s. A 24MB file takes ~2 hours.
 
-### WiFi Transfer (Fast)
+### WiFi Transfer (Fast) — PARTIALLY DECODED
 
-Complete sequence observed from official app:
+> **Firmware matters here.** The sequence below was captured from the
+> official app on **firmware 1.3.3**. On **firmware 1.8** it does not work:
+> no SSID is ever broadcast, and the device tears down BLE a few seconds
+> later, after which it only returns following a **physical power-cycle**.
+> `APP&WIFIC` cannot recover it, because BLE is already gone.
+>
+> Use the firmware 1.8 order below instead. Reported with reproductions in
+> [#4](https://github.com/shahcolate/pocket-libre/issues/4).
+
+**Firmware 1.3.3 (as captured — do not use on 1.8):**
 
 ```
-# 1. Trigger WiFi mode
 >> APP&U&WIFI
 << MCU&WIFIS&0                         # Initializing
-
-# 2. Get WiFi AP credentials
 >> APP&WIFI
-<< MCU&WIFI&PKT01_GREY_XXXXXXXX&XXXXXXXX   # SSID & password (first 8 chars of session key)
+<< MCU&WIFI&PKT01_GREY_XXXXXXXX&XXXXXXXX   # SSID & password
+>> APP&WIFIO                           # <-- AP raised BEFORE staging
+<< MCU&WIFIO
+>> APP&WIFIS                           # Poll 3 -> 2 -> 1
+>> APP&U&<date>&<timestamp>            # Stage file
+<< MCU&U&24890732                      # File size in bytes
+>> APP&U&WIFI                          # Begin transfer
+>> APP&WIFIC                           # Cleanup
+```
 
-# 3. Turn on WiFi AP
+**Firmware 1.8 (confirmed working, 4/4 reproductions):**
+
+Stage the file **before** raising the AP, and join the network
+**concurrently** with the status poll — the AP window is only seconds wide.
+
+```
+>> APP&U&WIFI
+   (no response on 1.8)
+>> APP&WIFI
+<< MCU&WIFI&<ssid>&<8 chars>           # Password = first 8 chars of session key
+>> APP&U&2026-09-03&20260903145856     # <-- STAGE FIRST
+<< MCU&U&6653128                       # File size in bytes
 >> APP&WIFIO
 << MCU&WIFIO
-
-# 4. Poll until ready (status: 3→2→1)
->> APP&WIFIS
-<< MCU&WIFIS&3                         # AP starting
->> APP&WIFIS
-<< MCU&WIFIS&2                         # Almost ready
->> APP&WIFIS
-<< MCU&WIFIS&1                         # Ready for transfer
-
-# 5. Select file for transfer
->> APP&U&2026-03-28&20260328001919
-<< MCU&U&24890732                       # File size in bytes
-
-# 6. Begin WiFi transfer
->> APP&U&WIFI
-<< MCU&U&WIFI
-<< MCU&U&24890732                       # Confirmed
-
-# 7. Transfer happens over WiFi HTTP (device is AP at 192.168.4.1)
-# ... download completes ...
-
-# 8. Device signals completion
-<< MCU&OFF
-
-# 9. Cleanup
->> APP&WIFIC
-<< MCU&WIFIC
+<< MCU&OFF                             # Meaning unclear, see below
+   t+0.8s  << MCU&WIFIS&3              # AP created, waiting for a client
+   t+8.0s  << MCU&WIFIS&2              # Client connecting
+   t+9.8s  << MCU&WIFIS&1              # Ready for transfer
 ```
+
+BLE survives this order, and no power-cycle is needed afterwards.
+
+Joined-state details (firmware 1.8):
+
+| | |
+|---|---|
+| Client IP | `192.168.200.2/24` (DHCP from the device) |
+| Gateway | `192.168.200.1` (the device) |
+| Security | WPA2-PSK, 2.4 GHz |
+| AP password | First 8 characters of the session key |
+
+**What happens on the AP is NOT decoded.**
+
+An earlier revision of this document asserted the device serves files over
+HTTP at `192.168.4.1`. That was inference from a BLE-only capture, which
+cannot observe a WiFi transfer, and it was wrong. Field data from firmware
+1.8 found:
+
+- All 65535 TCP ports swept on `192.168.200.1`: only **53** open (captive-portal
+  DNS), identical before and after `APP&U&WIFI`.
+- No mDNS/Bonjour advertisement, no UDP replies, no third host on the subnet.
+- Nothing connects back to the client either: ~20k TCP listeners and ~4k UDP
+  receivers on ports 1024-21024 saw no inbound connection after staging.
+
+Strings from the vendor app describe a **framed socket protocol**, not HTTP:
+`PocketWifiFileTransferClient`, `PocketWifiFilePacketParser`, and exceptions
+for invalid frames, truncated frames and checksums. The transfer verb is
+`RANGE` (`"RANGE request bytes="`, `"RANGE complete received="`,
+`"RANGE cancel generation="`). The port is a compiled-in integer constant and
+has not been recovered.
+
+Still unknown:
+
+- The socket port, and whether it ever opens on firmware 1.8.
+- The `RANGE` frame format (header, length, checksum layout).
+- Whether the `MCU&OFF` that arrives right after `APP&WIFIO` means the staged
+  transfer is being torn down. It is documented below as transfer completion,
+  but that came from the 1.3.3 capture and may be wrong.
+- What, if anything, causes the device to raise the transfer listener.
 
 **WiFi Status Codes:**
 - `0` = Initializing

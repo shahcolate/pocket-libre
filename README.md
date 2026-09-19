@@ -83,11 +83,28 @@ receives it during pairing, so you need to capture it once from an HCI trace.
 ships with Additional Tools for Xcode. Start a capture, open the vendor app, let
 it connect, then search the trace for `APP&SK&`.
 
-**Android.** Enable *Bluetooth HCI snoop log* in Developer Options, connect with
-the vendor app, then pull `btsnoop_hci.log` and open it in Wireshark.
+**Android (easiest).** The vendor app writes an analytics event containing
+`distinct_id`, a 28-character account ID whose **first 16 characters are the
+session key**. No packet capture needed:
+
+```bash
+adb logcat | grep -i distinct_id
+```
+
+**Android (packet capture).** Enable *Bluetooth HCI snoop log* in Developer
+Options, connect with the vendor app, then pull `btsnoop_hci.log` and open it
+in Wireshark. Note that the snoop log inside an ordinary bug report is **not**
+sufficient — it truncates every ACL packet to 15 bytes, leaving 3 bytes of ATT
+payload, so `APP&`/`MCU&` frames are unreadable. Set *Bluetooth HCI snoop log*
+to **Full**, restart the Bluetooth stack, and take the capture from there.
 
 `pocket-libre sniff` won't find it for you. It only sees notifications on its own
 connection, and the key is something the app *writes*.
+
+> **The session key is per-account, not per-device**, and its first 8 characters
+> are your device's WiFi AP password. See [SECURITY.md](SECURITY.md) for what
+> that means for you. Both findings come from
+> [#4](https://github.com/shahcolate/pocket-libre/issues/4).
 
 Full protocol details are in [PROTOCOL.md](PROTOCOL.md).
 
@@ -139,7 +156,7 @@ isn't scanning flat out all day.
 | `transcribe` | Transcribe locally with Whisper |
 | `convert` | Convert raw audio to WAV |
 | `wifi-transfer` | Download over WiFi instead of BLE ([see caveat](#wifi-transfer)) |
-| `wifi-discover` | Probe for the device's HTTP endpoint |
+| `wifi-discover` | Sweep the device's WiFi AP for listening sockets |
 | `explore` | Dump GATT services and characteristics |
 | `sniff` | Subscribe to all BLE notifications |
 | `probe` | Probe write characteristics |
@@ -197,22 +214,41 @@ proprietary codec. [PROTOCOL.md](PROTOCOL.md) has the full command reference.
 
 ## WiFi transfer
 
-BLE transfers run at 3–4 KB/s, so a long recording can take hours. The device
-can raise a WiFi access point and serve files over HTTP instead, and the BLE side
-of that handshake is fully decoded.
+> **Experimental, and it can strand your device.** On firmware 1.8, raising
+> the WiFi access point in the order this project previously used left the
+> device unreachable over BLE until it was **physically power-cycled** —
+> `APP&WIFIC` cannot recover it, because BLE is already gone by then. Use
+> `pocket-libre download` unless you are actively helping decode this.
 
-**The HTTP endpoint it serves files from is still unconfirmed.** `wifi-transfer`
-drives the whole flow and probes for the endpoint, but it may come up empty until
-someone with a device pins it down. If you own a Pocket, this is the most useful
-thing you can contribute:
+BLE transfers run at 3–4 KB/s, so a long recording can take hours. The device
+can raise a WiFi access point to move files faster, and the BLE side of that
+handshake is decoded.
+
+**What runs on that access point is not decoded.** This project used to claim
+the device served files over HTTP at `192.168.4.1`. That was inference from a
+BLE-only packet capture, and firmware 1.8 field data
+([#4](https://github.com/shahcolate/pocket-libre/issues/4)) showed it was
+wrong: with a file staged and the device reporting ready, an exhaustive sweep
+of all 65535 TCP ports found only DNS open. Strings in the vendor app describe
+a framed socket protocol using a `RANGE` verb, whose port and frame format are
+both unknown.
+
+So `wifi-transfer` requires `--url` and refuses to raise the access point
+without one — there is no point risking the device for a download with nowhere
+to download from.
+
+If you own a Pocket, the most useful thing you can contribute is a port sweep
+of the AP, run twice — once before staging a file, once while the device
+reports `WIFIS=1`:
 
 ```bash
 # Join the device's WiFi network first, then:
-pocket-libre wifi-discover --date 2026-03-28 --timestamp 20260328001919
+pocket-libre wifi-discover
 ```
 
-Paste the output into [an issue](https://github.com/shahcolate/pocket-libre/issues).
-Once it's known, everyone gets fast transfers.
+Share both outputs in [an issue](https://github.com/shahcolate/pocket-libre/issues).
+A confirmed "nothing listens" is as valuable as a hit: it would mean fast
+transfer is unreachable on this firmware by any client we could write.
 
 ## Status
 
@@ -226,14 +262,16 @@ Once it's known, everyone gets fast transfers.
 - [x] Web interface
 - [x] Config file and setup wizard
 - [x] Auto-connect and background sync (`watch`)
-- [x] WiFi transfer client and endpoint discovery
-- [ ] WiFi HTTP endpoint confirmed against hardware
+- [x] WiFi AP handshake (BLE side), firmware 1.8 sequence
+- [ ] WiFi transfer socket port identified
+- [ ] WiFi `RANGE` frame format decoded
 
 ## Contributing
 
 Pull requests welcome. The things that would help most right now:
 
-1. **Find the WiFi HTTP endpoint.** Run `wifi-discover` on the device AP.
+1. **Find the WiFi transfer socket.** Run `wifi-discover` on the device AP,
+   before and after staging a file, and share both sweeps.
 2. **Test on other firmware.** Run `pocket-libre explore` and share the output.
 3. **Report protocol differences.** Capture with PacketLogger and open an issue.
 
