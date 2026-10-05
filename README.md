@@ -136,6 +136,62 @@ connection, and the key is something the app *writes*.
 
 Full protocol details are in [PROTOCOL.md](PROTOCOL.md).
 
+## Two recorders, or two people
+
+One config can describe several recorders. Each gets a profile, and a profile
+owns its own library, web port, credentials and transcription settings.
+
+```bash
+pocket-libre setup --profile mine
+pocket-libre setup --profile hers
+pocket-libre profiles
+```
+
+```toml
+default_profile = "mine"
+
+[device]
+session_key = "SHARED-ACCOUNT-KEY"   # issued per vendor account, not per device
+
+[profiles.mine]
+label = "Mine"
+address = "AA:BB:CC:DD:EE:01"
+
+[profiles.hers]
+label = "Hers"
+address = "AA:BB:CC:DD:EE:02"
+accent = "#C0888D"
+```
+
+Then `-p`, or `POCKET_LIBRE_PROFILE`, picks one:
+
+```bash
+pocket-libre -p hers status
+pocket-libre -p hers sync
+pocket-libre watch --all        # every profile, one device at a time
+pocket-libre web --all          # one server per profile, on its own port
+```
+
+A few things follow from the profiles being separate on purpose:
+
+- **Each has its own library.** A profile that does not set
+  `output_directory` gets a subdirectory of the global one rather than sharing
+  it, so two people's recordings cannot end up in one folder by default.
+- **A command never guesses whose device it means.** With several profiles and
+  no `default_profile`, every device command asks for `--profile` instead of
+  picking one. `pocket-libre profiles` also warns when two profiles would share
+  a library, a port or a device address.
+- **A web server serves exactly one profile.** The profile is resolved once,
+  before anything else runs, and `web --all` puts each server in its own
+  process. The header shows whose library it is, in that profile's accent
+  colour, because two identical tabs on adjacent ports is how someone ends up
+  reading the wrong person's transcript.
+- **The session key can be shared.** It is issued per vendor account, so a
+  profile with no key of its own falls back to `[device].session_key`. Two
+  recorders on one account need one key; on two accounts, one each.
+
+A config with no profiles at all behaves exactly as it always did.
+
 ## Use
 
 ### Web interface
@@ -189,6 +245,12 @@ isn't scanning flat out all day.
 | `explore` | Dump GATT services and characteristics |
 | `sniff` | Subscribe to all BLE notifications |
 | `probe` | Probe write characteristics |
+| `profiles` | List configured recorders, their libraries and ports |
+| `speakers` | List, enroll, test or forget voices in this library |
+| `search` | Search inside transcripts, summaries and action items |
+| `reindex` | Rebuild this library's search index |
+| `tasks` | Print action items as checkboxes |
+| `export` | Write recordings out as Markdown notes |
 
 Every command takes `--help`.
 
@@ -211,14 +273,26 @@ directory = "~/Pocket Libre"
 [defaults]
 whisper_model = "base.en"
 summary_style = "meeting"
+transcribe_backend = "openai-whisper"   # or faster-whisper-xxl, or none
+language = "auto"                       # or it, de, en, ...
+faster_whisper_path = ""                # only if it is not auto-detected
+device = "cuda"
+max_speakers = 0                        # 0 = let diarization decide
 
 [analysis]
 enabled = "summary,entities"
 ```
 
-Set values directly with `pocket-libre config --set device.address=...`.
-Resolution order is CLI flag → environment variable → config file → default,
-so `ANTHROPIC_API_KEY` in your shell overrides the file.
+Set values directly with `pocket-libre config --set device.address=...`, or
+`--set profiles.hers.address=...` for one profile.
+
+Resolution order is CLI flag → environment variable → **profile** → config
+file → default, so `ANTHROPIC_API_KEY` in your shell overrides the file, and a
+profile overrides the global sections.
+
+The config holds your API key and your session key, so it is written
+owner-only: mode `600`, or a rewritten ACL on Windows where `chmod` cannot
+restrict a file.
 
 ## API keys
 
@@ -234,6 +308,86 @@ a single unnamed speaker.
 That cost estimate assumes Claude Haiku 4.5 at $1 and $5 per million input and
 output tokens, on a half-hour recording with summary, entities, and mind map all
 enabled. Every command prints what it actually spent.
+
+## Transcription
+
+Two backends. `defaults.transcribe_backend` picks one, per profile if you like.
+
+| | `openai-whisper` | `faster-whisper-xxl` |
+|--|------------------|----------------------|
+| Runs | in this process | a local standalone build |
+| Install | included | [download it separately](https://github.com/Purfview/whisper-standalone-win) |
+| Languages | English models by default | all of Whisper's, auto-detected |
+| Speakers | no; falls back to pyannote, Claude, or one label | included, no HuggingFace token |
+| Needs torch | yes | no |
+| Speed | CPU, realtime-ish | GPU, an order of magnitude faster |
+
+`openai-whisper` is the default and is unchanged. To use the other one:
+
+```bash
+pocket-libre config --set defaults.transcribe_backend=faster-whisper-xxl
+pocket-libre config --set defaults.faster_whisper_path=/path/to/Faster-Whisper-XXL
+pocket-libre config --set defaults.language=auto
+```
+
+It is found automatically if it sits in `~/Tools/Faster-Whisper-XXL` or on
+`PATH`, or via `FASTER_WHISPER_XXL`.
+
+### Language
+
+`defaults.language` takes `auto` or a code like `it`, `de`, `en`. On `auto` the
+backend is asked to sample several windows rather than just the first, because
+detection from one window is a coin flip on a short recording - and when it
+loses, Whisper transcribes the audio phonetically in the wrong language instead
+of failing in a way you would notice. If you always speak the same language,
+set it.
+
+## Who is speaking
+
+Diarization labels are per recording: `SPEAKER_01` in one file is not the same
+person as `SPEAKER_01` in the next. So names do not come from a label map. They
+come from the speaker embedding the local backend dumps - one vector per
+speaker, which *is* comparable across recordings.
+
+```bash
+pocket-libre speakers                                  # enrolled voices
+pocket-libre speakers enroll Ada     --recording 2026-10-04/20261004120000 --label SPEAKER_01
+pocket-libre speakers test --recording 2026-10-04/20261004120000
+pocket-libre speakers threshold 0.7
+```
+
+Pick the recording by ear once, enroll the voice, and later recordings name it
+for you. `speakers test` prints the actual similarity scores, which is how you
+should choose the threshold: the right cut-off depends on the microphone and on
+the voices, not on this project's default. Enroll a second sample from another
+room to make the match hold up.
+
+Matching is one name per speaker and one speaker per name, and anything below
+the threshold stays `SPEAKER_01`. That is the right answer when it is someone
+you have not enrolled.
+
+## Searching, tasks, and notes
+
+```bash
+pocket-libre search mortgage rate            # inside transcripts and summaries
+pocket-libre search budget --kind summary
+pocket-libre tasks                           # commitments, as checkboxes
+pocket-libre export --to ~/Notes             # one Markdown note per recording
+```
+
+Search is an SQLite FTS5 index kept inside the library, so it covers one
+profile and never reaches another. It is accent-folded, so `perche` finds
+`perché`, and it is refreshed before each search.
+
+`tasks` prints the action items the `entities` analysis extracts as `- [ ]`
+lines, ready to paste into a task list. A task carries a date only when the
+transcript stated one: "next Tuesday" is quoted as said rather than turned into
+a deadline nobody agreed to.
+
+`export` writes one self-contained note per recording - frontmatter, summary,
+action items, full transcript. It needs a destination, from `--to` or from the
+profile's own `vault_path` with `vault_export = true`, and it will not
+overwrite a note that already exists unless you pass `--overwrite`.
 
 ## Protocol
 
@@ -330,6 +484,10 @@ device's WiFi password.
 - [x] Config file and setup wizard
 - [x] Auto-connect and background sync (`watch`)
 - [x] WiFi AP handshake (BLE side), firmware 1.8 sequence
+- [x] Several recorders in one config, with separate libraries
+- [x] Pluggable transcription backends, multilingual, speakers included
+- [x] Named speakers, matched by voice embedding across recordings
+- [x] Full-text search, action items, Markdown export
 - [ ] WiFi transfer socket port identified
 - [ ] WiFi `RANGE` frame format decoded
 
