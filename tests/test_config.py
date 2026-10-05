@@ -1,6 +1,9 @@
 """Config resolution chain, TOML escaping, and file permissions."""
 
+import getpass
+import os
 import stat
+import subprocess
 
 import pytest
 
@@ -113,8 +116,33 @@ def test_bool_and_int_types_preserved(config_home):
     assert loaded["defaults"]["count"] == 7
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not the ACL on Windows")
 def test_config_file_is_owner_only(config_home):
     """Config holds API keys and the device session key."""
     cfg.save_config({"api": {"anthropic_key": "sk-ant-secret"}})
     mode = stat.S_IMODE(cfg.CONFIG_FILE.stat().st_mode)
     assert mode & 0o077 == 0, f"config is group/world accessible: {mode:o}"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ACL hardening is Windows-only")
+def test_config_file_acl_is_owner_only_on_windows(config_home):
+    """`chmod` cannot restrict a file on Windows, so the ACL must be rewritten.
+
+    `stat().st_mode` always reports 0o666 on NTFS regardless of the real
+    permissions, so asserting on mode bits here tested nothing: the config kept
+    whatever ACL it inherited and stayed readable by every account on the
+    machine.
+    """
+    cfg.save_config({"api": {"anthropic_key": "sk-ant-secret"}})
+    listing = subprocess.run(
+        ["icacls", str(cfg.CONFIG_FILE)], capture_output=True, text=True, check=False,
+    ).stdout
+    user = os.environ.get("USERNAME") or getpass.getuser()
+
+    # One ACE per `:(`, and the trustee is whatever precedes it.
+    entries = listing.split(":(")
+    assert len(entries) == 2, f"expected exactly one ACL entry, got {listing!r}"
+    assert entries[0].rstrip().lower().endswith(user.lower()), (
+        f"config is readable by someone other than its owner: {listing!r}"
+    )
+    assert "(I)" not in listing, "inherited entries survived; /inheritance:r did not apply"
