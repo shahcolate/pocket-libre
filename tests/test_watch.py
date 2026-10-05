@@ -2,7 +2,12 @@
 
 import pytest
 
-from pocket_libre.watch import MAX_BACKOFF_SECONDS, next_backoff, watch_loop
+from pocket_libre.watch import (
+    MAX_BACKOFF_SECONDS,
+    next_backoff,
+    watch_loop,
+    watch_many,
+)
 
 
 @pytest.fixture
@@ -148,3 +153,118 @@ async def _true():
 
 async def _false():
     return False
+
+
+# ── Several recorders at once ───────────────────
+
+
+def _target(name, address, counts, calls=None):
+    """A WatchTarget whose sync returns the next value from `counts`."""
+    from pocket_libre.watch import WatchTarget
+
+    queue = list(counts)
+
+    async def sync_once():
+        if calls is not None:
+            calls.append(name)
+        return queue.pop(0) if queue else 0
+
+    return WatchTarget(name=name, address=address, sync_once=sync_once)
+
+
+@pytest.mark.asyncio
+async def test_watch_many_syncs_each_present_device(recorder):
+    _slept, sleep = recorder
+    calls: list[str] = []
+    targets = [
+        _target("erika", "AA:01", [2], calls),
+        _target("oleksandr", "AA:02", [1], calls),
+    ]
+
+    async def present(_address):
+        return True
+
+    stats = await watch_many(targets, poll_interval=60.0, presence_check=present,
+                             max_iterations=1, sleep=sleep)
+    assert calls == ["erika", "oleksandr"]
+    assert stats["erika"].recordings_synced == 2
+    assert stats["oleksandr"].recordings_synced == 1
+
+
+@pytest.mark.asyncio
+async def test_watch_many_never_syncs_two_devices_at_once(recorder):
+    """One BLE connection per device and one adapter: strictly sequential."""
+    _slept, sleep = recorder
+    in_flight = 0
+    overlaps = 0
+
+    from pocket_libre.watch import WatchTarget
+
+    async def sync_once():
+        nonlocal in_flight, overlaps
+        in_flight += 1
+        if in_flight > 1:
+            overlaps += 1
+        import asyncio as _asyncio
+        await _asyncio.sleep(0)
+        in_flight -= 1
+        return 1
+
+    targets = [
+        WatchTarget("erika", "AA:01", sync_once),
+        WatchTarget("oleksandr", "AA:02", sync_once),
+    ]
+
+    async def present(_address):
+        return True
+
+    await watch_many(targets, poll_interval=60.0, presence_check=present,
+                     max_iterations=3, sleep=sleep)
+    assert overlaps == 0
+
+
+@pytest.mark.asyncio
+async def test_absent_device_does_not_slow_the_present_one(recorder):
+    """Each target backs off on its own."""
+    _slept, sleep = recorder
+    calls: list[str] = []
+    targets = [
+        _target("here", "AA:01", [1, 1, 1, 1, 1], calls),
+        _target("away", "AA:02", [], calls),
+    ]
+
+    async def present(address):
+        return address == "AA:01"
+
+    stats = await watch_many(targets, poll_interval=60.0, presence_check=present,
+                             max_iterations=6, sleep=sleep)
+    # The present device is scanned every interval; the absent one doubles its
+    # wait each miss, so it is scanned far less often.
+    assert stats["here"].scans > stats["away"].scans
+    assert calls and set(calls) == {"here"}
+
+
+@pytest.mark.asyncio
+async def test_watch_many_survives_a_failing_sync(recorder):
+    _slept, sleep = recorder
+
+    from pocket_libre.watch import WatchTarget
+
+    async def boom():
+        raise RuntimeError("BLE dropped")
+
+    targets = [WatchTarget("erika", "AA:01", boom)]
+
+    async def present(_address):
+        return True
+
+    stats = await watch_many(targets, poll_interval=60.0, presence_check=present,
+                             max_iterations=2, sleep=sleep)
+    assert stats["erika"].failures == 2
+    assert stats["erika"].recordings_synced == 0
+
+
+@pytest.mark.asyncio
+async def test_watch_many_with_no_targets_returns_immediately(recorder):
+    _slept, sleep = recorder
+    assert await watch_many([], sleep=sleep) == {}

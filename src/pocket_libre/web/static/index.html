@@ -15,10 +15,15 @@
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
+mark { background: var(--accent); color: var(--bg); border-radius: 2px; padding: 0 2px; }
 
 .header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
 .header h1 { font-size: 1.3rem; font-weight: 600; }
 .header .subtitle { color: var(--dim); font-size: 0.85rem; }
+/* Whose library this is. Loud on purpose: two of these tabs are open at once. */
+.profile-badge { font-size: 0.8rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 0.2rem 0.6rem; border-radius: 999px; background: var(--accent); color: var(--bg); }
+body.has-profile .header { border-bottom: 2px solid var(--accent); }
 .status-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); margin-left: auto; }
 .status-dot.connected { background: var(--green); }
 .status-dot.error { background: var(--red); }
@@ -129,7 +134,8 @@ tr:hover td { background: var(--bg3); }
 
 <div class="header">
   <h1>Pocket Libre</h1>
-  <span class="subtitle">Your recordings, your keys, your data.</span>
+  <span class="profile-badge" id="profileBadge" hidden></span>
+  <span class="subtitle" id="headerSubtitle">Your recordings, your keys, your data.</span>
   <div class="status-dot" id="statusDot" title="Not connected"></div>
 </div>
 
@@ -194,8 +200,9 @@ tr:hover td { background: var(--bg3); }
     <div class="card">
       <h3>Processed Recordings</h3>
       <div style="margin-bottom:1rem">
-        <input type="text" id="librarySearch" placeholder="Search recordings..." oninput="filterLibrary()" style="width:100%;padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:0.9rem;">
+        <input type="text" id="librarySearch" placeholder="Search inside transcripts, summaries and action items..." oninput="filterLibrary()" style="width:100%;padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:0.9rem;">
       </div>
+      <div id="searchResults" hidden></div>
       <div id="localRecordings">
         <div class="empty">No recordings yet. Download and process recordings from the Device tab.</div>
       </div>
@@ -725,14 +732,63 @@ async function runAnalysis(date, ts, btn) {
   }
 }
 
+// Full-text search over this profile's library. The old version only matched
+// the text already on screen, so it could not find a word spoken inside a
+// recording — which is the only thing worth searching a library for.
+let librarySearchTimer = null;
+const MATCH_OPEN = '\u0001';
+const MATCH_CLOSE = '\u0002';
+
 function filterLibrary() {
-  const query = document.getElementById('librarySearch').value.toLowerCase();
-  document.querySelectorAll('.library-card').forEach(card => {
-    const date = card.dataset.date || '';
-    const ts = card.dataset.ts || '';
-    const text = card.textContent.toLowerCase();
-    card.style.display = (text.includes(query) || date.includes(query) || ts.includes(query)) ? '' : 'none';
-  });
+  clearTimeout(librarySearchTimer);
+  librarySearchTimer = setTimeout(runLibrarySearch, 220);
+}
+
+async function runLibrarySearch() {
+  const query = document.getElementById('librarySearch').value.trim();
+  const results = document.getElementById('searchResults');
+  const listing = document.getElementById('localRecordings');
+
+  if (!query) {
+    results.hidden = true;
+    results.innerHTML = '';
+    listing.hidden = false;
+    return;
+  }
+
+  listing.hidden = true;
+  results.hidden = false;
+  results.innerHTML = '<div class="empty">Searching...</div>';
+
+  let hits;
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(query));
+    hits = await r.json();
+  } catch (e) {
+    results.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  if (!Array.isArray(hits) || hits.length === 0) {
+    results.innerHTML = `<div class="empty">Nothing matched ${escapeHtml(query)}.</div>`;
+    return;
+  }
+
+  results.innerHTML = hits.map(hit => {
+    // Escape first, then turn the match markers into highlights, so nothing
+    // in a transcript can inject markup.
+    const snippet = escapeHtml(hit.snippet || '')
+      .split(MATCH_OPEN).join('<mark>')
+      .split(MATCH_CLOSE).join('</mark>');
+    return `<div class="card" style="padding:0.9rem 1rem">
+      <div style="display:flex;gap:0.6rem;align-items:baseline">
+        <strong>${escapeHtml(hit.date)}</strong>
+        <span style="color:var(--dim);font-size:0.8rem">${escapeHtml(hit.timestamp)}</span>
+        <span style="color:var(--dim);font-size:0.75rem;margin-left:auto">${escapeHtml(hit.kind)}</span>
+      </div>
+      <div style="margin-top:0.4rem;font-size:0.85rem;line-height:1.5">${snippet}</div>
+    </div>`;
+  }).join('');
 }
 
 function escapeHtml(s) {
@@ -909,7 +965,29 @@ async function scanForDevice() {
   btn.textContent = 'Scan';
 }
 
+// Which profile this server serves. Applied before anything else so the page
+// never spends a moment looking like it belongs to the other recorder.
+async function applyProfile() {
+  try {
+    const r = await fetch('/api/profile');
+    const p = await r.json();
+    if (!p || !p.name) return;
+    document.title = `${p.label} - Pocket Libre`;
+    const badge = document.getElementById('profileBadge');
+    badge.textContent = p.label;
+    badge.hidden = false;
+    document.getElementById('headerSubtitle').textContent = p.library;
+    if (p.accent) {
+      document.documentElement.style.setProperty('--accent', p.accent);
+    }
+    document.body.classList.add('has-profile');
+  } catch (e) {
+    // A missing endpoint just means no profiles are configured.
+  }
+}
+
 // Init
+applyProfile();
 loadSettings().then(() => {
   // First-run: if no device address, show settings with welcome
   const addr = document.getElementById('cfgAddress').value;
