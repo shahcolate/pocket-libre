@@ -1,10 +1,8 @@
-"""WiFi AP diagnostics, subnet guards, and the HTTP escape hatch.
+"""WiFi AP diagnostics and subnet guards.
 
-Note what these tests can and cannot show. The port-scan and subnet-guard
-tests exercise real logic. The HTTP tests run against a local stub server,
-and no Pocket firmware has been observed serving files over HTTP — they
-cover the `--url` escape hatch, not the device. Passing them says nothing
-about whether WiFi transfer works on hardware.
+The port-scan tests use a local HTTP server only as something that listens;
+the device itself serves its transfer socket on 8475, which
+test_wifi_transfer.py covers.
 """
 
 import errno
@@ -19,9 +17,7 @@ from pocket_libre.wifi import (
     DEFAULT_HOST,
     ScanResourceError,
     _safe_worker_count,
-    build_url,
     diagnose,
-    download_file,
     is_host_reachable,
     on_ap_subnet,
     scan_ports,
@@ -66,29 +62,6 @@ def server():
 @pytest.fixture
 def port(server):
     return server.server_address[1]
-
-
-# ── URL building ────────────────────────────────
-
-
-def test_build_url_substitutes_filename():
-    url = build_url("/{filename}", "192.168.4.1", 80, "2026-03-28", "20260328001919")
-    assert url == "http://192.168.4.1/20260328001919.mp3"
-
-
-def test_build_url_substitutes_date_and_timestamp():
-    url = build_url(
-        "/sd/{date}/{timestamp}.mp3", "192.168.4.1", 80, "2026-03-28", "20260328001919"
-    )
-    assert url == "http://192.168.4.1/sd/2026-03-28/20260328001919.mp3"
-
-
-def test_build_url_omits_default_port():
-    assert ":80" not in build_url("/{filename}", "h", 80, "d", "t")
-
-
-def test_build_url_includes_nonstandard_port():
-    assert "h:8080" in build_url("/{filename}", "h", 8080, "d", "t")
 
 
 # ── Reachability ────────────────────────────────
@@ -297,64 +270,3 @@ def test_ordinary_refusal_still_reads_as_closed(monkeypatch):
 def test_worker_count_stays_inside_the_descriptor_budget():
     assert _safe_worker_count(1024) >= 8
     assert _safe_worker_count(4) <= 4
-
-
-# ── Download ────────────────────────────────────
-
-
-def test_download_writes_file(tmp_path, port):
-    out = tmp_path / "rec.mp3"
-    written = download_file(f"http://127.0.0.1:{port}/20260328001919.mp3", out)
-    assert written == len(MP3_BODY)
-    assert out.read_bytes() == MP3_BODY
-
-
-def test_download_reports_progress(tmp_path, port):
-    seen = []
-    download_file(
-        f"http://127.0.0.1:{port}/20260328001919.mp3",
-        tmp_path / "rec.mp3",
-        progress_callback=lambda cur, tot: seen.append(cur),
-    )
-    assert seen and seen[-1] == len(MP3_BODY)
-
-
-def test_download_failure_leaves_no_file(tmp_path):
-    out = tmp_path / "rec.mp3"
-    assert download_file("http://127.0.0.1:1/nope", out, timeout=0.5) == 0
-    assert not out.exists()
-
-
-def test_download_leaves_no_partial_file(tmp_path):
-    out = tmp_path / "rec.mp3"
-    download_file("http://127.0.0.1:1/nope", out, timeout=0.5)
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_short_transfer_is_rejected(tmp_path, port):
-    """A truncated download must not leave a file later runs treat as complete."""
-    out = tmp_path / "rec.mp3"
-    written = download_file(
-        f"http://127.0.0.1:{port}/20260328001919.mp3", out,
-        expected_size=len(MP3_BODY) * 10,
-    )
-    assert written == 0
-    assert not out.exists()
-
-
-def test_download_creates_parent_directories(tmp_path, port):
-    out = tmp_path / "a" / "b" / "rec.mp3"
-    assert download_file(f"http://127.0.0.1:{port}/20260328001919.mp3", out) > 0
-    assert out.exists()
-
-
-# ── Bare-path templates ─────────────────────────
-
-
-def test_bare_path_template_resolves_against_default_host():
-    """A path-only template must not produce a hostless `http:///...` URL."""
-    from pocket_libre.wifi import DEFAULT_HOST
-
-    url = build_url("/{filename}", DEFAULT_HOST, 80, "2026-03-28", "20260328001919")
-    assert url.startswith(f"http://{DEFAULT_HOST}/")
-    assert "http:///" not in url

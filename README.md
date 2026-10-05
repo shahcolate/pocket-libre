@@ -56,24 +56,27 @@ Firmware matters more than you would expect — the device's WiFi behaviour
 differs enough between versions that a sequence confirmed on one can strand
 another. Check yours with `pocket-libre status`.
 
-| | 1.3.3 | 1.8 |
-|---|---|---|
-| Scan, connect, authenticate | Works | Works |
-| Status, storage, file listing | Works | Works |
-| BLE download (`download`, `sync`, `watch`) | Works | Works |
-| Transcribe, diarize, summarize, web UI | Works | Works |
-| WiFi AP handshake | Works | Works, but [needs a different order](PROTOCOL.md#wifi-transfer-fast--partially-decoded) |
-| WiFi file transfer | Never confirmed | **No endpoint found** |
+| | 1.3.3 | 1.7 | 1.8 |
+|---|---|---|---|
+| Scan, connect, authenticate | Works | Works | Works |
+| Status, storage, file listing | Works | Works | Works |
+| BLE download (`download`, `sync`, `watch`) | Works | Works | Works |
+| Transcribe, diarize, summarize, web UI | Works | Works | Works |
+| WiFi AP handshake | Works | Works | Works |
+| WiFi file transfer (`wifi-transfer`) | Untested | **Works** (WiFi firmware V9) | **Works** (WiFi firmware V9) |
 
-**Everything except WiFi transfer works on both.** The BLE path is slower
-(3–4 KB/s, so a long recording takes hours) but it is reliable, and it is what
-`download`, `sync` and `watch` use.
+The 1.7 results come from a field report
+([#9](https://github.com/shahcolate/pocket-libre/pull/9)) on WiFi firmware V9.
 
-**WiFi transfer does not currently work on any firmware.** The BLE handshake
-that raises the access point is decoded, but nothing has been found listening
-on the AP once it is up — see [#4](https://github.com/shahcolate/pocket-libre/issues/4)
-and the [WiFi transfer](#wifi-transfer) section. On firmware 1.8, raising the
-AP the wrong way can leave the device needing a physical power-cycle.
+**Everything works on firmware 1.7 and 1.8.** The BLE path is slower (tens of KB/s on
+1.8, as little as 3–4 KB/s on 1.3.3) but it is what `download`, `sync` and
+`watch` use. `wifi-transfer` pulls recordings over the device's WiFi access
+point at about 1 MB/s; see [WiFi transfer](#wifi-transfer).
+
+WiFi transfer works on firmware 1.7 and 1.8, and `wifi-transfer` refuses
+other firmware unless you pass `--force`; it then restarts the access point
+for every file, which works on both known versions. On 1.3.3 the BLE side
+looks the same, but nobody has tried it.
 
 Other firmware versions are untested. If you have one, `pocket-libre status`
 and `pocket-libre explore` output would be genuinely useful in an issue.
@@ -240,8 +243,8 @@ isn't scanning flat out all day.
 | `process` | Process an existing audio file |
 | `transcribe` | Transcribe locally with Whisper |
 | `convert` | Convert raw audio to WAV |
-| `wifi-transfer` | Download over WiFi instead of BLE ([see caveat](#wifi-transfer)) |
-| `wifi-discover` | Sweep the device's WiFi AP for listening sockets |
+| `wifi-transfer` | Download over WiFi instead of BLE, about 1 MB/s ([details](#wifi-transfer)) |
+| `wifi-discover` | Sweep the device's WiFi AP for listening sockets (diagnostic) |
 | `explore` | Dump GATT services and characteristics |
 | `sniff` | Subscribe to all BLE notifications |
 | `probe` | Probe write characteristics |
@@ -397,50 +400,72 @@ proprietary codec. [PROTOCOL.md](PROTOCOL.md) has the full command reference.
 
 ## WiFi transfer
 
-> **Experimental, and it can strand your device.** On firmware 1.8, raising
-> the WiFi access point in the order this project previously used left the
-> device unreachable over BLE until it was **physically power-cycled** —
-> `APP&WIFIC` cannot recover it, because BLE is already gone by then. Use
-> `pocket-libre download` unless you are actively helping decode this.
-
-BLE transfers run at 3–4 KB/s, so a long recording can take hours. The device
-can raise a WiFi access point to move files faster, and the BLE side of that
-handshake is decoded.
-
-**What runs on that access point is not decoded.** This project used to claim
-the device served files over HTTP at `192.168.4.1`. That was inference from a
-BLE-only packet capture, and firmware 1.8 field data
-([#4](https://github.com/shahcolate/pocket-libre/issues/4)) showed it was
-wrong: with a file staged and the device reporting ready, an exhaustive sweep
-of all 65535 TCP ports found only DNS open. Strings in the vendor app describe
-a framed socket protocol using a `RANGE` verb, whose port and frame format are
-both unknown.
-
-So `wifi-transfer` requires `--url` and refuses to raise the access point
-without one — there is no point risking the device for a download with nowhere
-to download from.
-
-If you own a Pocket, the most useful thing you can contribute is a port sweep
-of the AP, run twice — once before staging a file, once while the device
-reports `WIFIS=1`:
+On firmware 1.7 and 1.8 the device can raise a WiFi access point and serve
+recordings over it at about 1 MB/s, instead of the tens of KB/s that BLE manages. An hour
+of audio (about 14 MB) takes 15–20 s instead of many minutes.
 
 ```bash
-# Join the device's WiFi network first, then:
-pocket-libre wifi-discover
+# Every recording not downloaded yet, into <output dir>/<date>/<timestamp>.mp3
+pocket-libre wifi-transfer
+
+# Only recent ones
+pocket-libre wifi-transfer --since 2026-10-01
+
+# One recording
+pocket-libre wifi-transfer --date 2026-10-03 --timestamp 20261003143216
 ```
 
-Share both outputs in [an issue](https://github.com/shahcolate/pocket-libre/issues).
-A confirmed "nothing listens" is as valuable as a hit: it would mean fast
-transfer is unreachable on this firmware by any client we could write.
+What it does:
+
+1. Connects over BLE and authenticates. It checks the firmware (1.7 or 1.8)
+   and the battery (above 10%).
+2. Raises the device's access point and moves **this machine's WiFi** onto it.
+   The network is hidden and WPA2-protected; its password is the first 8
+   characters of your session key.
+3. Requests each recording as a BLE transfer and switches it to WiFi, which is
+   how the vendor app does it, then saves the file. The device serves two files
+   per access-point session on 1.8 and one on 1.7, so the AP is restarted in
+   between (about 15 s each time).
+4. Lowers the access point and puts this machine back on its usual network. It
+   does this after errors and Ctrl-C too.
+
+Requirements and caveats:
+
+- **Joining the network automatically** needs NetworkManager on Linux, or
+  netsh on Windows. On macOS, or with `--wifi manual`, the command prints the
+  network name and password, and you join it yourself while it waits. The
+  network is hidden, so on macOS that's **Other Network…** in the WiFi menu,
+  once per access-point session: before every file on firmware 1.7.
+- **While it runs, this machine has no internet over WiFi.** With Ethernet
+  connected you keep internet over the cable. On Linux, the temporary profile
+  doesn't take over the default route.
+- **The temporary profile holds the AP password while it exists** (NetworkManager
+  or Windows profile store). It's deleted when the command ends.
+- **Close the vendor app first.** The device takes one BLE connection at a
+  time.
+
+How the transfer works on the wire is in
+[PROTOCOL.md](PROTOCOL.md#wifi-transfer-fast--decoded-on-firmware-18).
 
 ## Troubleshooting
 
-**The device stopped responding over BLE after a WiFi command.** This is the
-firmware 1.8 trap: `APP&WIFIO` sent in the wrong order tears down BLE, and
-`APP&WIFIC` cannot recover it because BLE is already gone. **Power-cycle the
-device physically** — hold the power button until it switches off, then back
-on. It will start advertising again. Nothing on the device is lost;
-recordings are on its internal storage.
+**The device stopped responding over BLE after a WiFi command.** This was
+reported on firmware 1.8 when raising the access point by hand
+([#4](https://github.com/shahcolate/pocket-libre/issues/4)), and `APP&WIFIC`
+can't recover it because BLE is already gone. **Power-cycle the device
+physically**: hold the power button until it switches off, then turn it back
+on. It will start advertising again. Nothing on the device is lost; recordings
+are on its internal storage.
+
+**The device isn't found right after a WiFi transfer.** Give it up to a minute
+before the next run: right after a session it sometimes drops new BLE
+connections. Also check that the vendor app hasn't reconnected in the
+background.
+
+**`wifi-transfer` can't join the network.** The access point is hidden, so it
+won't show up in a WiFi scan; that is expected. On Linux, check that
+NetworkManager manages your WiFi interface (`nmcli device`), or pick one with
+`--iface`. As a fallback, `--wifi manual` lets you join it yourself.
 
 **`pocket-libre scan` finds nothing.** Make sure the device is on and not
 connected to the vendor app — it accepts one BLE connection at a time, so
@@ -452,10 +477,10 @@ a key captured from one phone works for every device on that account — but it
 changes if you sign in as someone else. Re-capture it with the
 [logcat method](#getting-your-session-key). Keys are 16 characters.
 
-**Downloads are slow.** That is expected: BLE runs at 3–4 KB/s, so an hour of
-audio takes roughly two hours to pull. `pocket-libre watch` runs in the
-background and syncs new recordings as they appear, which is usually a better
-fit than waiting on a single download.
+**Downloads are slow.** That is expected over BLE: tens of KB/s on firmware
+1.7 and 1.8, and 3–4 KB/s on 1.3.3. On 1.7 and 1.8, `pocket-libre wifi-transfer`
+runs at about 1 MB/s. Otherwise, `pocket-libre watch` runs in the background
+and syncs new recordings as they appear.
 
 **A download came back short.** The device occasionally drops a transfer.
 `download` retries on its own; if it keeps failing, move the device closer and
@@ -484,19 +509,23 @@ device's WiFi password.
 - [x] Config file and setup wizard
 - [x] Auto-connect and background sync (`watch`)
 - [x] WiFi AP handshake (BLE side), firmware 1.8 sequence
+- [x] WiFi transfer socket (TCP 8475) and stream format decoded (firmware 1.8)
+- [x] WiFi transfer confirmed on firmware 1.7 (one file per access-point session)
+- [x] `wifi-transfer` over WiFi, with automatic join on Linux and Windows
 - [x] Several recorders in one config, with separate libraries
 - [x] Pluggable transcription backends, multilingual, speakers included
 - [x] Named speakers, matched by voice embedding across recordings
 - [x] Full-text search, action items, Markdown export
-- [ ] WiFi transfer socket port identified
-- [ ] WiFi `RANGE` frame format decoded
+- [ ] Several files over one WiFi connection
+- [ ] WiFi transfer on other firmware
 
 ## Contributing
 
 Pull requests welcome. The things that would help most right now:
 
-1. **Find the WiFi transfer socket.** Run `wifi-discover` on the device AP,
-   before and after staging a file, and share both sweeps.
+1. **Try `wifi-transfer` on other firmware** (anything but 1.8, with
+   `--force`) and report what happens: `pocket-libre status` output, and
+   whether the AP came up and the files arrived.
 2. **Test on other firmware.** Run `pocket-libre explore` and share the output.
 3. **Report protocol differences.** Capture with PacketLogger and open an issue.
 

@@ -13,6 +13,7 @@ Usage:
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass
 
 from bleak import BleakClient
@@ -40,6 +41,13 @@ _ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 def is_safe_id(value: str) -> bool:
     """True if `value` is safe to use as a single filesystem path component."""
     return bool(value) and value not in (".", "..") and bool(_ID_PATTERN.match(value))
+
+
+def split_messages(text: str) -> list[str]:
+    """One notification can carry several MCU& messages back to back
+    (e.g. "MCU&WIFIOMCU&OFF"); split them, dropping padding NULs."""
+    text = text.replace("\0", "").strip()
+    return [p.strip() for p in re.split(r"(?=MCU&)", text) if p.strip()]
 
 
 @dataclass
@@ -78,6 +86,14 @@ class PocketCommander:
         self._audio_data = bytearray()
         self._audio_event = asyncio.Event()
         self._disconnected = False
+        # Every MCU& message received, with its arrival time, in order. Unlike
+        # _responses this is never cleared, so replies that arrive on their own
+        # schedule (WIFIS changes, MCU&U&WIFI, MCU&OFF) can be waited for with
+        # mark() / wait_for_message().
+        self.messages: list[tuple[float, str]] = []
+        self._message_event = asyncio.Event()
+        self._write_lock = asyncio.Lock()
+        self.discarded_audio_bytes = 0
         # Size announced by MCU&U for the most recent download_ble.
         self.last_expected_size = 0
 
@@ -118,11 +134,92 @@ class PocketCommander:
         self._disconnected = True
         self._response_event.set()
         self._audio_event.set()
+        self._message_event.set()
+
+    @property
+    def connected(self) -> bool:
+        return bool(self.client and self.client.is_connected and not self._disconnected)
 
     def _on_response(self, sender: int, data: bytearray):
         text = data.decode("ascii", errors="replace")
-        self._responses.append(text)
+        now = time.monotonic()
+        for part in split_messages(text) or [text]:
+            self._responses.append(part)
+            self.messages.append((now, part))
         self._response_event.set()
+        self._message_event.set()
+
+    def _discard_audio(self, sender: int, data: bytearray):
+        self.discarded_audio_bytes += len(data)
+
+    async def _write(self, command: str) -> None:
+        payload = f"{CMD_PREFIX}{command}".encode("ascii")
+        async with self._write_lock:
+            await self.client.write_gatt_char(CMD_WRITE_CHAR, payload, response=False)
+
+    # ── Asynchronous replies ─────────────────────
+
+    def mark(self) -> int:
+        """A position in `messages`; wait_for_message(since=mark) only looks after it."""
+        return len(self.messages)
+
+    async def send_nowait(self, command: str) -> int:
+        """Write APP&<command> without collecting replies. Returns the mark before it."""
+        since = self.mark()
+        await self._write(command)
+        return since
+
+    async def wait_for_message(self, name: str, since: int, timeout: float,
+                               accept=None) -> str | None:
+        """The value of the first "MCU&<name>&<value>" (or bare "MCU&<name>")
+        received after `since` and passing `accept`, or None on timeout or
+        disconnect."""
+        exact = f"{RSP_PREFIX}{name}"
+        prefix = exact + "&"
+        deadline = time.monotonic() + timeout
+        index = since
+        while True:
+            while index < len(self.messages):
+                text = self.messages[index][1]
+                index += 1
+                if text == exact:
+                    value = ""
+                elif text.startswith(prefix):
+                    value = text[len(prefix):]
+                else:
+                    continue
+                if accept is None or accept(value):
+                    return value
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self._disconnected:
+                return None
+            self._message_event.clear()
+            try:
+                await asyncio.wait_for(self._message_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                pass
+
+    async def request(self, command: str, answer: str, timeout: float = 5.0,
+                      accept=None) -> str | None:
+        """Send APP&<command> and wait for the value of "MCU&<answer>&...". """
+        since = await self.send_nowait(command)
+        return await self.wait_for_message(answer, since, timeout, accept=accept)
+
+    async def start_audio_sink(self) -> None:
+        """Subscribe to the audio channel and throw the data away.
+
+        A Bluetooth transfer only runs while something is subscribed to the
+        audio characteristic — without a subscriber the device ends it at once
+        with MCU&OFF. The WiFi switch (APP&U&WIFI) needs a running Bluetooth
+        transfer to switch, so the WiFi path subscribes and discards.
+        """
+        await self.client.start_notify(AUDIO_NOTIFY_CHAR, self._discard_audio)
+
+    async def stop_audio_sink(self) -> None:
+        try:
+            await self.client.stop_notify(AUDIO_NOTIFY_CHAR)
+        except Exception:
+            pass
 
     def _on_audio(self, sender: int, data: bytearray):
         self._audio_data.extend(data)
@@ -133,10 +230,9 @@ class PocketCommander:
         self._responses.clear()
         self._response_event.clear()
 
-        payload = f"{CMD_PREFIX}{command}".encode("ascii")
         if verbose:
             console.print(f"  [cyan]>>> APP&{command}[/cyan]")
-        await self.client.write_gatt_char(CMD_WRITE_CHAR, payload, response=False)
+        await self._write(command)
 
         # Wait for response(s) — some commands return multiple lines
         await asyncio.sleep(0.3)
@@ -333,6 +429,10 @@ class PocketCommander:
         return bytes(self._audio_data)
 
     # ── WiFi Transfer ────────────────────────────
+    #
+    # Single-step wrappers. The working firmware 1.8 transfer, with its
+    # ordering and timing rules, is wifi.WifiSession, which uses
+    # request() / wait_for_message() instead of these.
 
     async def wifi_get_credentials(self) -> tuple[str, str] | None:
         """Get WiFi AP credentials. Returns (ssid, password) or None."""
@@ -346,13 +446,14 @@ class PocketCommander:
         return None
 
     async def wifi_trigger(self) -> bool:
-        """Put the device into WiFi mode (step 1 of the WiFi sequence)."""
+        """APP&U&WIFI. Before a transfer it gets no answer on firmware 1.8;
+        during a running Bluetooth transfer it switches that transfer to WiFi."""
         await self._send("U&WIFI")
         await asyncio.sleep(0.5)
         return True
 
     async def wifi_enable(self) -> bool:
-        """Bring the access point up (step 3 of the WiFi sequence)."""
+        """APP&WIFIO: raise the access point."""
         await self._send("WIFIO")
         return True
 

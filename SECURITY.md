@@ -58,6 +58,14 @@ should not treat the session key as a secret that only you hold, and should not
 assume the device's WiFi AP is protected against someone who has seen your
 account ID.
 
+**`wifi-transfer` stores the AP password while it runs.** To join the device's
+network it creates a temporary WiFi profile named `pocket-libre`, in
+NetworkManager on Linux or the Windows profile store, with the AP password in
+it. The profile is deleted when the command ends, also after errors and Ctrl-C.
+A hard kill can leave it behind: delete it with
+`nmcli connection delete pocket-libre` or
+`netsh wlan delete profile name=pocket-libre`.
+
 **Not in scope:** a compromised local machine, a malicious Anthropic or
 HuggingFace API endpoint, physical access to an unlocked device, or someone in
 BLE range with your session key.

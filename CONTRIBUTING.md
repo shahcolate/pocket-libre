@@ -5,10 +5,11 @@ shared what they found.
 
 ## What's most useful
 
-1. **The WiFi HTTP endpoint.** The BLE side of WiFi transfer is fully decoded,
-   but nobody has confirmed which HTTP path the device serves files from. If you
-   own a Pocket: join its WiFi AP and run `pocket-libre wifi-discover`, then
-   paste the output into an issue. This unblocks fast transfers for everyone.
+1. **WiFi transfer on other firmware.** It is decoded and working on firmware
+   1.8, and confirmed on 1.7 (see `PROTOCOL.md`). On anything else, run
+   `pocket-libre wifi-transfer --force` and report what happens, with
+   `pocket-libre status` output. An Android HCI snoop log of the vendor app's
+   "Quick Transfer" is the best evidence for how a firmware does it.
 2. **Other firmware versions.** Run `pocket-libre explore` and share the output.
    The GATT map in `PROTOCOL.md` comes from a single device on firmware 1.3.3.
 3. **Protocol corrections.** Capture with PacketLogger (macOS) or the Android
@@ -77,7 +78,8 @@ src/pocket_libre/
   analyze.py     Entity extraction, mind maps, chat
   pricing.py     Model ID and token costs — change prices here, once
   watch.py       Background auto-sync loop
-  wifi.py        WiFi transfer client and endpoint discovery
+  wifi.py        WiFi transfer: AP session, socket protocol, port sweep
+  hostwifi.py    Moving this machine's WiFi onto the device AP and back
   web/app.py     FastAPI backend
   web/static/    Single-page frontend
 ```

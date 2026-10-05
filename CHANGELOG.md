@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+WiFi transfer works on firmware 1.7 and 1.8. It was decoded from the vendor
+app's Android HCI snoop log during a real "Quick Transfer", reproduced from a
+Linux laptop, and verified byte for byte against BLE downloads. A field report
+confirmed it on 1.7.
+
 ### Added
 
 - **Profiles: one config, several recorders.** `[profiles.<name>]` tables give
@@ -67,26 +72,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   folder a profile names in `vault_path`. Off unless that profile sets
   `vault_export`, and it refuses to overwrite a note that already exists
   without `--overwrite`, since it may have been edited by hand.
-
-### Fixed
-
-- **The config was readable by every account on the machine, on Windows.**
-  `chmod(0o600)` is a no-op there: the file kept whatever ACL it inherited,
-  while `stat().st_mode` reported `0o666` regardless, so the test that was
-  meant to catch this could not. The ACL is now rewritten with `icacls`, and
-  the test asserts on the ACL on Windows and on the mode bits elsewhere. The
-  file holds the Anthropic key and the session key, which is also the device's
-  WiFi password.
-
-- **`pocket-libre config` never printed its section names.** `[device]` and
-  friends were being parsed as Rich style tags and dropped, leaving an
-  unlabelled list of values.
-
-- **The library search box could not find anything that was said.** It filtered
-  the text already rendered on screen, so it matched dates and filenames but
-  never the contents of a recording.
+- **`wifi-transfer` downloads recordings over WiFi at about 1 MB/s** on
+  firmware 1.7 and 1.8 (WiFi firmware V9). It raises the device's access
+  point, joins it, requests each recording as a BLE transfer and switches it to
+  WiFi with `APP&U&WIFI`, then reads the raw MP3 from TCP
+  `192.168.200.1:8475`. One recording with `--date`/`--timestamp`; otherwise
+  every recording not yet downloaded (`--since`, `--output-dir`,
+  `--overwrite`). The device serves a limited number of transfer connections
+  per AP session (two on 1.8, one on 1.7), so the AP is restarted in between.
+  A failed file (a reset connection, a full disk, no data) counts as one
+  failure, and the next file gets a fresh AP. If the BLE link drops, the run
+  stops and still reports what was saved. It refuses other firmware without
+  `--force` (and then restarts the AP for every file), and a battery under
+  10%.
+- `hostwifi`: joins the device's hidden network and switches back afterwards,
+  with NetworkManager (Linux), netsh (Windows), or by hand (`--wifi manual`,
+  for macOS). It never re-issues a connect while one is in progress, because
+  that drops the transfer socket.
+- `wifi.WifiSession`, `wifi.receive_file` and `wifi.open_transfer_socket`, the
+  transfer as a library.
+- `PocketCommander.messages`, `mark()`, `wait_for_message()`, `request()` and
+  `send_nowait()`, for replies that arrive on their own schedule (`WIFIS`
+  changes, `MCU&U&WIFI`, `MCU&OFF`). Also `start_audio_sink()`: a BLE transfer
+  only runs while the audio characteristic is subscribed.
+- `protocol.TRANSFER_PORT`, `END_MARKER`, `FILES_PER_AP_SESSION` (by
+  firmware), and correctly named WiFi status codes.
+- PROTOCOL.md documents the WiFi transfer:
+  - the vendor app's exact sequence and the client protocol;
+  - the 10-byte end marker and the two-connections-per-AP limit;
+  - `MCU&SHUT` when switching with no connection open;
+  - BLE transfer details measured on 1.8 (notification sizes, `MCU&OFF`, the
+    required audio subscription, about 26–65 KB/s);
+  - more commands (`MAC`, `GET&USB`, `WPING`) and the app's connect sequence.
+- **USB mass storage control.** `pocket-libre usb on|off|status` switches the
+  device's USB drive mode over BLE (`APP&USB&<0|1>`, read back with
+  `APP&GET&USB`), decoded from an HCI snoop capture of the vendor app.
 
 ### Changed
+
+- **WiFi status codes were mislabelled.** `MCU&WIFIS&3` is "AP coming up" and
+  `2` is "waiting for a client", not the other way round. `1` means a client
+  has joined. `WIFI_STATUS_STARTING` is now 3, and `WIFI_STATUS_WAITING_FOR_CLIENT`
+  and `WIFI_STATUS_CLIENT_JOINED` were added. `WIFI_STATUS_CONNECTING` is
+  gone.
+- `wifi-discover` is now a diagnostic for other firmware; it names 8475 when
+  it finds it.
+- `PocketCommander` splits notifications that carry several `MCU&` replies
+  (e.g. `MCU&WIFIOMCU&OFF`).
+- PROTOCOL.md corrects earlier guesses: `RANGE` is the BLE byte-range
+  download, not the WiFi verb; `APP&WIFI&SWITCH` isn't implemented on 1.8; and
+  staging a file before `APP&WIFIO` isn't required.
 
 - **`fastapi[standard]` is now plain `fastapi` plus `uvicorn`.** The `standard`
   extra pulls in `fastapi-cloud-cli`, and with it a Sentry client and
@@ -94,11 +129,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a tool whose promise is that your audio never leaves your machine is an own
   goal.
 
-### Added
+### Removed
 
-- **USB mass storage control.** `pocket-libre usb on|off|status` switches the
-  device's USB drive mode over BLE (`APP&USB&<0|1>`, read back with
-  `APP&GET&USB`), decoded from an HCI snoop capture of the vendor app.
+- The HTTP escape hatch: `wifi-transfer --url`, the `wifi.url_template`
+  setting, `wifi.download_file()` and `wifi.build_url()`. No firmware serves
+  files over HTTP.
 
 ### Fixed
 
@@ -123,6 +158,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed** and retried, instead of being kept. Previously `sync` and
   `watch` only rejected transfers under half the size estimated from
   duration, and `download` checked nothing.
+
+- **The config was readable by every account on the machine, on Windows.**
+  `chmod(0o600)` is a no-op there: the file kept whatever ACL it inherited,
+  while `stat().st_mode` reported `0o666` regardless, so the test that was
+  meant to catch this could not. The ACL is now rewritten with `icacls`, and
+  the test asserts on the ACL on Windows and on the mode bits elsewhere. The
+  file holds the Anthropic key and the session key, which is also the device's
+  WiFi password.
+
+- **`pocket-libre config` never printed its section names.** `[device]` and
+  friends were being parsed as Rich style tags and dropped, leaving an
+  unlabelled list of values.
+
+- **The library search box could not find anything that was said.** It filtered
+  the text already rendered on screen, so it matched dates and filenames but
+  never the contents of a recording.
+
+- **`tasks` crashed on a Windows console in a legacy code page**, while
+  printing the calendar emoji in a due date. Files are still written UTF-8;
+  only the console falls back to a plainer marker.
+- **`export` listed a library without checking it existed**, so a profile with
+  nothing synced yet got a `FileNotFoundError` traceback instead of being told
+  to sync something first. `search` and `tasks` already checked.
 
 ## [1.1.0] — 2026-09-19
 

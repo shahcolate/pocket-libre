@@ -1789,18 +1789,11 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
     """Sweep the device's WiFi AP for listening sockets.
 
     \b
-    The BLE side of WiFi transfer is decoded; what runs on the AP is not.
-    Field data from firmware 1.8 found no HTTP server and only port 53
-    open, and the vendor app appears to use a framed socket protocol with
-    a RANGE verb. See https://github.com/shahcolate/pocket-libre/issues/4
-
-    \b
-    The open question is whether anything listens once a file is staged in
-    the working firmware 1.8 order. To help answer it, run this twice:
-    once before staging, once while the device reports WIFIS=1, and share
-    both outputs in an issue. A confirmed "nothing listens" is as useful
-    as a hit.
+    A diagnostic for firmware other than 1.7 and 1.8. On those the transfer
+    socket is TCP 8475 (see PROTOCOL.md), and 'wifi-transfer' uses it. Join the
+    device's WiFi network first; this does not raise the AP itself.
     """
+    from pocket_libre.protocol import TRANSFER_PORT
     from pocket_libre.wifi import DEFAULT_HOST, diagnose
 
     target = host or DEFAULT_HOST
@@ -1817,18 +1810,18 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
 
     if report.scan is None:
         console.print(
-            "\n[yellow]Did not sweep.[/yellow] Join the device's WiFi network "
-            "first (see 'pocket-libre wifi-transfer')."
+            "\n[yellow]Did not sweep.[/yellow] Join the device's WiFi network first."
         )
         return
 
     if report.scan.open_ports:
         listed = ", ".join(str(port) for port in report.scan.open_ports)
+        known = (f"\n\n{TRANSFER_PORT} is the transfer socket known from firmware 1.7 and 1.8."
+                 if TRANSFER_PORT in report.scan.open_ports else "")
         console.print(Panel(
             f"[bold]{len(report.scan.open_ports)} open port(s)[/bold] on {target}\n\n"
-            f"{listed}\n\n"
-            "If any of these appeared only after staging a file, that is the\n"
-            "transfer listener and a genuine finding. Please report it:\n"
+            f"{listed}{known}\n\n"
+            "On firmware other than 1.7 and 1.8, please report what you found:\n"
             "  https://github.com/shahcolate/pocket-libre/issues",
             border_style="green",
         ))
@@ -1849,9 +1842,9 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
         console.print(Panel(
             f"[bold]Nothing listening[/bold] on {target}\n\n"
             f"Swept {report.scan.scanned:,} ports from {report.local_address}.\n\n"
-            "This is a useful result. If it holds with a file staged and the\n"
-            "device reporting WIFIS=1, fast transfer is not reachable on this\n"
-            "firmware by any client we could write. Please report it:\n"
+            f"On firmware 1.7 and 1.8, {TRANSFER_PORT} listens only while the AP is\n"
+            "up and has transfer connections left (one per AP session on 1.7, two\n"
+            "on 1.8). On other firmware, please report this result:\n"
             "  https://github.com/shahcolate/pocket-libre/issues",
             border_style="yellow",
         ))
@@ -1860,182 +1853,180 @@ def wifi_discover(host: str | None, start_port: int, end_port: int, force: bool)
 @cli.command("wifi-transfer")
 @click.option("--address", default=None, help="BLE address of your Pocket device.")
 @click.option("--key", "session_key", default=None, help="Session key.")
-@click.option("--date", required=True, help="Recording date (YYYY-MM-DD).")
-@click.option("--timestamp", required=True, help="Recording timestamp.")
-@click.option("--output", default=None, help="Output file path.")
-@click.option("--url", default=None,
-              help="Endpoint URL. Supports {date}/{timestamp}/{filename}.")
+@click.option("--date", default=None, help="Recording date (YYYY-MM-DD), with --timestamp.")
+@click.option("--timestamp", default=None, help="Recording timestamp, with --date.")
+@click.option("--since", default=None,
+              help="Without --date/--timestamp: only recordings from this date (YYYY-MM-DD) on.")
+@click.option("--output", default=None,
+              help="Output file for a single recording (default: <timestamp>.mp3).")
+@click.option("--output-dir", default=None,
+              help="Output directory for all recordings (default: the configured one).")
+@click.option("--overwrite", is_flag=True, help="Download files that already exist again.")
+@click.option("--wifi", "wifi_backend", default="auto",
+              type=click.Choice(["auto", "networkmanager", "netsh", "manual"]),
+              help="How to join the device's network: NetworkManager (Linux), netsh "
+                   "(Windows), or manual (you join it yourself). Default: by OS.")
+@click.option("--iface", default=None, help="WiFi interface to use (default: the first one).")
+@click.option("--force", is_flag=True, help="Run on firmware other than 1.7 or 1.8.")
 @click.pass_context
-def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str,
-                  timestamp: str, output: str | None, url: str | None):
-    """Download a recording over WiFi instead of BLE. EXPERIMENTAL.
+def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str | None,
+                  timestamp: str | None, since: str | None, output: str | None,
+                  output_dir: str | None, overwrite: bool, wifi_backend: str,
+                  iface: str | None, force: bool):
+    """Download recordings over WiFi instead of BLE (firmware 1.7 and 1.8).
 
     \b
-    BLE runs at ~3-4 KB/s, so a long recording takes hours. This raises the
-    device's WiFi access point to pull the file faster.
+    Roughly 1 MB/s instead of BLE's few KB/s. Raises the device's WiFi
+    access point over BLE, moves this machine's WiFi onto it, downloads, and
+    puts this machine's WiFi back — also after errors and Ctrl-C. While it
+    runs, this machine has no internet over WiFi.
 
     \b
-    No endpoint is known. Firmware 1.8 field data found nothing listening
-    on the AP, so this command requires --url (or a configured
-    wifi.url_template) and refuses to touch the device without one. See
-    https://github.com/shahcolate/pocket-libre/issues/4
+    One recording with --date and --timestamp, otherwise every recording
+    (or those from --since on) into <output dir>/<date>/<timestamp>.mp3,
+    skipping files that already exist. The device serves two files per
+    access-point session on firmware 1.8 and one on 1.7, so the AP is
+    restarted in between (about 15 s each time).
 
     \b
-    WARNING: raising the AP can leave the device unreachable over BLE
-    until it is physically power-cycled. Do not run this unattended.
+    Joining needs NetworkManager on Linux or netsh on Windows; on macOS (or
+    with --wifi manual) you join the network yourself when asked.
     """
-    from pocket_libre.commands import PocketCommander, Recording
-    from pocket_libre.wifi import DEFAULT_HOST, build_url, download_file
+    from bleak.exc import BleakError
+
+    from pocket_libre.commands import is_safe_id
+    from pocket_libre.hostwifi import HostWifiError, backend
+    from pocket_libre.protocol import FILES_PER_AP_SESSION
+    from pocket_libre.wifi import (
+        DEFAULT_HOST,
+        WifiSession,
+        WifiTransferError,
+        files_per_ap_session,
+        firmware_line,
+    )
+
+    if (date is None) != (timestamp is None):
+        raise click.UsageError("Pass --date and --timestamp together, or neither.")
+    if output and date is None:
+        raise click.UsageError("--output is for a single recording; use --output-dir.")
+    if date is not None and not (is_safe_id(date) and is_safe_id(timestamp)):
+        raise click.UsageError("--date and --timestamp must be plain identifiers.")
 
     config = ctx.obj["config"]
     address = _require_address(address, config)
     session_key = _require_session_key(session_key, config)
-    url_template = url or get(config, "wifi", "url_template", default="")
+    out_root = Path(get_output_dir(config, output_dir))
 
-    # Refuse before touching BLE. APP&WIFIO is the command that can strand
-    # the device, so there is no version of this worth risking for a
-    # transfer we already know has nowhere to download from.
-    if not url_template:
-        raise click.ClickException(
-            "No WiFi endpoint is known, so this would raise the device's "
-            "access point for nothing.\n\n"
-            "Firmware 1.8 field data found no server listening on the AP "
-            "(issue #4), and raising it\ncan leave the device needing a "
-            "physical power-cycle. Refusing to proceed.\n\n"
-            "Use 'pocket-libre download' for a reliable BLE transfer.\n"
-            "If you have found the endpoint, pass it with --url."
-        )
+    def log(text: str) -> None:
+        console.print(f"[dim]{text}[/dim]")
 
-    rec = Recording(date=date, timestamp=timestamp, duration_s=0)
-    out_path = Path(output) if output else Path(f"{timestamp}.mp3")
+    def lost_link(error: Exception | None, not_attempted: int) -> None:
+        detail = f": {error}" if error else ""
+        console.print(f"\n[red]Lost the BLE link{detail}[/red]")
+        if not_attempted:
+            console.print(f"[yellow]{not_attempted} recording(s) not attempted.[/yellow]")
+        console.print("[yellow]The device may need a power-cycle before it "
+                      "connects again.[/yellow]")
 
-    console.print(Panel(
-        "[bold]This is experimental and can strand the device.[/bold]\n\n"
-        "On firmware 1.8, raising the WiFi AP in the documented order left "
-        "the device\nunreachable over BLE until it was physically "
-        "power-cycled. APP&WIFIC cannot\nrecover it, because BLE is "
-        "already gone.\n\n"
-        "'pocket-libre download' is slower but safe.",
-        border_style="red",
-    ))
-    click.confirm("  Continue anyway?", default=False, abort=True)
-
-    async def _transfer() -> tuple[int, bool]:
-        """Stage, raise the AP, and wait for it. Returns (size, ready)."""
+    async def _run() -> tuple[int, int]:
         async with PocketCommander(address) as cmd:
             if not await cmd.authenticate(session_key):
                 raise click.ClickException("Authentication failed.")
-
-            console.print("[dim]Requesting WiFi mode...[/dim]")
-            await cmd.wifi_trigger()
-
-            creds = await cmd.wifi_get_credentials()
-            if not creds:
+            firmware = await cmd.get_firmware()
+            if firmware_line(firmware) not in FILES_PER_AP_SESSION:
+                if not force:
+                    raise click.ClickException(
+                        f"This device runs firmware {firmware}. WiFi transfer works on "
+                        "firmware 1.7 and 1.8;\nother firmware may behave differently. "
+                        "Pass --force to try anyway, or use 'download'."
+                    )
+                log(f"Firmware {firmware} is untested; restarting the access point "
+                    "for every file.")
+            per_session = files_per_ap_session(firmware)
+            battery = await cmd.get_battery()
+            if 0 <= battery < 10:
                 raise click.ClickException(
-                    "Device did not report WiFi credentials. "
-                    "It may not support WiFi transfer on this firmware."
+                    f"Battery is at {battery}%. The device needs more than 10% for WiFi transfer."
                 )
-            ssid, password = creds
 
-            # Stage the file BEFORE raising the AP. This is the reverse of
-            # the order PROTOCOL.md documents from a firmware 1.3.3
-            # capture; on 1.8 the documented order never broadcasts an SSID
-            # and tears down BLE a few seconds later. Staging first makes
-            # the AP appear, keeps BLE alive, and lets WIFIS reach 1.
-            console.print("[dim]Staging the file...[/dim]")
-            size = await cmd.wifi_select_file(rec)
-            if size:
-                console.print(f"[dim]Device reports {size:,} bytes.[/dim]")
+            if date is not None:
+                rec = Recording(date=date, timestamp=timestamp, duration_s=0)
+                jobs = [(rec, Path(output) if output else Path(f"{timestamp}.mp3"))]
+            else:
+                recs = await cmd.list_all_recordings()
+                if since:
+                    recs = [r for r in recs if r.date >= since]
+                jobs = [(r, out_root / r.date / f"{r.timestamp}.mp3") for r in recs]
+            todo = [(r, p) for r, p in jobs if overwrite or not p.exists()]
+            skipped = len(jobs) - len(todo)
+            if skipped:
+                console.print(f"[dim]{skipped} recording(s) already downloaded, skipping.[/dim]")
+            if not todo:
+                console.print("[yellow]Nothing to download.[/yellow]")
+                return 0, 0
 
-            # Show credentials before the AP goes up: the window is only
-            # seconds wide, so the join has to happen while we poll rather
-            # than after. Prompting first and joining later always misses it.
-            console.print(Panel(
-                f"[bold]Have your WiFi settings open now[/bold]\n\n"
-                f"Network:  [bold cyan]{ssid}[/bold cyan]\n"
-                f"Password: [bold cyan]{password}[/bold cyan]\n\n"
-                "The access point appears for only a few seconds. Join it as "
-                "soon as it\nshows up — polling runs at the same time.\n\n"
-                "[dim]Your machine will lose internet until you switch "
-                "back.[/dim]",
-                border_style="yellow",
-            ))
-            # Off the event loop: this blocks on human input while a BLE
-            # connection is open, and the loop still needs to service
-            # disconnect callbacks and keepalives while it waits.
+            console.print(
+                f"[bold]{len(todo)} recording(s) to download over WiFi.[/bold] "
+                "This machine's WiFi switches to the device's network until done."
+            )
             try:
-                proceed = await asyncio.to_thread(
-                    click.confirm, "  Ready to raise the access point?",
-                    default=True,
-                )
-            except click.Abort:
-                proceed = False
-            if not proceed:
-                # The file is already staged, so leave the device clean
-                # rather than parked in WiFi mode.
-                await cmd.wifi_cleanup()
-                raise click.Abort()
+                host_wifi = backend(wifi_backend, DEFAULT_HOST, iface,
+                                    lambda kind, text: log(text))
+            except HostWifiError as e:
+                raise click.ClickException(str(e)) from e
 
-            console.print("[dim]Raising the access point — join it now...[/dim]")
-
-            # This is the command the firmware 1.8 report found can tear
-            # down BLE outright. When that happens bleak raises from the
-            # middle of the poll, and an unhandled traceback here would
-            # replace the one message the user actually needs: that the
-            # device may now need a physical power-cycle.
+            done = failed = 0
             try:
-                await cmd.wifi_enable()
-                ready = await cmd.wifi_wait_ready(timeout=90.0)
-                if ready:
-                    await cmd.wifi_begin_transfer()
-            except click.Abort:
-                raise
-            except Exception as e:
-                console.print(f"[yellow]Lost the BLE link: {e}[/yellow]")
-                return size, False
-            return size, ready
+                async with WifiSession(cmd, host_wifi, log=log,
+                                       files_per_session=per_session) as session:
+                    for i, (rec, path) in enumerate(todo, 1):
+                        console.print(f"  [{i}/{len(todo)}] {rec.date}/{rec.timestamp}...")
 
-    async def _cleanup():
-        try:
-            async with PocketCommander(address) as cmd:
-                await cmd.authenticate(session_key)
-                await cmd.wifi_cleanup()
-        except Exception:
-            pass
+                        def progress(current: int, total: int) -> None:
+                            pct = 100 * current // total if total else 100
+                            console.print(f"\r    [dim]{current:,}/{total:,} bytes ({pct}%)[/dim]",
+                                          end="")
 
-    expected, ready = asyncio.run(_transfer())
+                        try:
+                            result = await session.download(rec, path, progress_callback=progress)
+                        except (WifiTransferError, BleakError) as e:
+                            console.print(f"\n    [red]Failed: {e}[/red]")
+                            failed += 1
+                            # A dropped link can also surface as a missing
+                            # reply; either way, nothing more will work.
+                            if isinstance(e, BleakError) or not cmd.connected:
+                                lost_link(None, len(todo) - i)
+                                break
+                            continue
+                        rate = result.size / result.seconds / 1024 if result.seconds else 0
+                        console.print(
+                            f"\n    [green]Saved {result.size:,} bytes to {result.path} "
+                            f"({rate:,.0f} KB/s)[/green]"
+                        )
+                        if not result.marker_ok:
+                            console.print("    [yellow]The end marker was missing; the file "
+                                          "has the full size the device reported.[/yellow]")
+                        done += 1
+            except (WifiTransferError, HostWifiError) as e:
+                raise click.ClickException(str(e)) from e
+            except BleakError as e:
+                # Raised outside a download: raising the AP or cleaning up.
+                if not (done or failed):
+                    raise click.ClickException(f"Lost the BLE link: {e}") from e
+                lost_link(e, len(todo) - done - failed)
+            return done, failed
 
-    if not ready:
-        asyncio.run(_cleanup())
-        raise click.ClickException(
-            "The access point never reported ready (WIFIS=1).\n"
-            "If the device has also stopped advertising over BLE, it needs a "
-            "physical power-cycle —\n"
-            "APP&WIFIC cannot recover it once BLE is gone."
-        )
+    try:
+        done, failed = asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow] If this machine is still on the "
+                      "device's network, switch back to your usual one.")
+        raise SystemExit(130) from None
 
-    if url_template.startswith("/"):
-        target = build_url(url_template, DEFAULT_HOST, 80, date, timestamp)
-    else:
-        target = url_template.format(
-            date=date, timestamp=timestamp, filename=f"{timestamp}.mp3"
-        )
-    console.print(f"[dim]Using configured endpoint: {target}[/dim]")
-
-    def progress(current: int, total: int):
-        pct = 100 * current // total if total else 0
-        console.print(f"\r  [dim]{current:,}/{total:,} bytes ({pct}%)[/dim]", end="")
-
-    written = download_file(target, out_path, expected_size=expected,
-                            progress_callback=progress)
-    console.print()
-    asyncio.run(_cleanup())
-
-    if not written:
-        raise click.ClickException("Transfer failed. Reconnect to your normal network.")
-
-    console.print(f"[bold green]Saved {written:,} bytes to {out_path}[/bold green]")
-    console.print("[dim]You can reconnect to your normal WiFi network now.[/dim]")
+    if done or failed:
+        console.print(f"\n[bold]{done} downloaded, {failed} failed.[/bold]")
+    if failed:
+        raise SystemExit(1)
 
 
 # ── Web Interface ───────────────────────────────
