@@ -473,7 +473,7 @@ def show_config(ctx, show_path: bool, set_value: str | None):
         if "=" not in set_value or "." not in set_value.split("=")[0]:
             raise click.UsageError(
                 "Format: --set section.key=value (e.g., device.address=ABC123)\n"
-                "Profile settings take a third part: profiles.erika.address=ABC123"
+                "Profile settings take a third part: profiles.hers.address=ABC123"
             )
         path, value = set_value.split("=", 1)
         parts = path.split(".")

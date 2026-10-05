@@ -177,8 +177,8 @@ async def test_watch_many_syncs_each_present_device(recorder):
     _slept, sleep = recorder
     calls: list[str] = []
     targets = [
-        _target("erika", "AA:01", [2], calls),
-        _target("oleksandr", "AA:02", [1], calls),
+        _target("hers", "AA:01", [2], calls),
+        _target("mine", "AA:02", [1], calls),
     ]
 
     async def present(_address):
@@ -186,9 +186,9 @@ async def test_watch_many_syncs_each_present_device(recorder):
 
     stats = await watch_many(targets, poll_interval=60.0, presence_check=present,
                              max_iterations=1, sleep=sleep)
-    assert calls == ["erika", "oleksandr"]
-    assert stats["erika"].recordings_synced == 2
-    assert stats["oleksandr"].recordings_synced == 1
+    assert calls == ["hers", "mine"]
+    assert stats["hers"].recordings_synced == 2
+    assert stats["mine"].recordings_synced == 1
 
 
 @pytest.mark.asyncio
@@ -211,8 +211,8 @@ async def test_watch_many_never_syncs_two_devices_at_once(recorder):
         return 1
 
     targets = [
-        WatchTarget("erika", "AA:01", sync_once),
-        WatchTarget("oleksandr", "AA:02", sync_once),
+        WatchTarget("hers", "AA:01", sync_once),
+        WatchTarget("mine", "AA:02", sync_once),
     ]
 
     async def present(_address):
@@ -253,15 +253,15 @@ async def test_watch_many_survives_a_failing_sync(recorder):
     async def boom():
         raise RuntimeError("BLE dropped")
 
-    targets = [WatchTarget("erika", "AA:01", boom)]
+    targets = [WatchTarget("hers", "AA:01", boom)]
 
     async def present(_address):
         return True
 
     stats = await watch_many(targets, poll_interval=60.0, presence_check=present,
                              max_iterations=2, sleep=sleep)
-    assert stats["erika"].failures == 2
-    assert stats["erika"].recordings_synced == 0
+    assert stats["hers"].failures == 2
+    assert stats["hers"].recordings_synced == 0
 
 
 @pytest.mark.asyncio

@@ -80,15 +80,15 @@ def test_missing_or_broken_voices_file_is_empty(tmp_path):
 
 def test_enrolling_and_forgetting(tmp_path):
     library = speakers.VoiceLibrary.load(tmp_path)
-    library.enroll("Erika", vector(0.5))
-    library.enroll("Erika", vector(0.51))
+    library.enroll("Ada", vector(0.5))
+    library.enroll("Ada", vector(0.51))
     library.save()
 
     reloaded = speakers.VoiceLibrary.load(tmp_path)
-    assert reloaded.names == ["Erika"]
-    assert len(reloaded.voices["Erika"]) == 2, "samples are kept, not averaged"
-    assert reloaded.forget("Erika") is True
-    assert reloaded.forget("Erika") is False
+    assert reloaded.names == ["Ada"]
+    assert len(reloaded.voices["Ada"]) == 2, "samples are kept, not averaged"
+    assert reloaded.forget("Ada") is True
+    assert reloaded.forget("Ada") is False
 
 
 def test_a_voice_needs_a_name_and_a_vector(tmp_path):
@@ -96,7 +96,7 @@ def test_a_voice_needs_a_name_and_a_vector(tmp_path):
     with pytest.raises(ValueError):
         library.enroll("  ", vector(0.1))
     with pytest.raises(ValueError):
-        library.enroll("Erika", [])
+        library.enroll("Ada", [])
 
 
 def test_a_corrupt_library_loads_empty_rather_than_crashing(tmp_path):
@@ -132,33 +132,33 @@ def _library(tmp_path, **voices):
 
 
 def test_a_known_voice_gets_its_name(tmp_path):
-    library = _library(tmp_path, Erika=[1.0, 0.0, 0.0])
+    library = _library(tmp_path, Ada=[1.0, 0.0, 0.0])
     names = speakers.identify({"SPEAKER_01": [0.99, 0.01, 0.0]}, library)
-    assert names == {"SPEAKER_01": "Erika"}
+    assert names == {"SPEAKER_01": "Ada"}
 
 
 def test_an_unknown_voice_stays_unnamed(tmp_path):
     """Below the threshold, no name is the right answer."""
-    library = _library(tmp_path, Erika=[1.0, 0.0, 0.0])
+    library = _library(tmp_path, Ada=[1.0, 0.0, 0.0])
     assert speakers.identify({"SPEAKER_01": [0.0, 1.0, 0.0]}, library) == {}
 
 
 def test_two_speakers_can_never_become_the_same_person(tmp_path):
     """One name per label and one label per name, best pairs first."""
-    library = _library(tmp_path, Erika=[1.0, 0.0])
+    library = _library(tmp_path, Ada=[1.0, 0.0])
     names = speakers.identify(
         {"SPEAKER_01": [1.0, 0.02], "SPEAKER_02": [1.0, 0.01]}, library,
     )
-    assert list(names.values()) == ["Erika"]
+    assert list(names.values()) == ["Ada"]
     assert len(names) == 1
 
 
 def test_the_stronger_pair_wins_when_two_labels_compete(tmp_path):
-    library = _library(tmp_path, Erika=[1.0, 0.0])
+    library = _library(tmp_path, Ada=[1.0, 0.0])
     names = speakers.identify(
         {"weak": [1.0, 0.5], "strong": [1.0, 0.0]}, library, threshold=0.5,
     )
-    assert names == {"strong": "Erika"}
+    assert names == {"strong": "Ada"}
 
 
 def test_nothing_to_match_against_returns_nothing(tmp_path):
@@ -168,9 +168,9 @@ def test_nothing_to_match_against_returns_nothing(tmp_path):
 
 
 def test_best_match_reports_the_score(tmp_path):
-    library = _library(tmp_path, Erika=[1.0, 0.0], David=[0.0, 1.0])
+    library = _library(tmp_path, Ada=[1.0, 0.0], Grace=[0.0, 1.0])
     name, score = library.best_match([0.95, 0.05])
-    assert name == "Erika"
+    assert name == "Ada"
     assert score > 0.9
 
 
@@ -179,8 +179,8 @@ def test_names_are_applied_only_where_matched():
         {"start": 0, "end": 1, "speaker": "SPEAKER_01", "text": "a"},
         {"start": 1, "end": 2, "speaker": "SPEAKER_02", "text": "b"},
     ]
-    out = speakers.apply_names(segments, {"SPEAKER_01": "Erika"})
-    assert out[0]["speaker"] == "Erika"
+    out = speakers.apply_names(segments, {"SPEAKER_01": "Ada"})
+    assert out[0]["speaker"] == "Ada"
     assert out[1]["speaker"] == "SPEAKER_02"
     assert speakers.apply_names(segments, {}) is segments
 

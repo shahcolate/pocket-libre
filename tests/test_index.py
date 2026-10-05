@@ -16,7 +16,7 @@ def library_with(tmp_path, **by_reference):
 
 def test_a_phrase_is_found_in_a_transcript(tmp_path):
     root = library_with(tmp_path, **{
-        "2026-10-04/20261004120000": "[00:00] Erika: we should call the supplier back",
+        "2026-10-04/20261004120000": "[00:00] Ada: we should call the supplier back",
     })
     hits = index.search(root, "supplier")
     assert len(hits) == 1
@@ -115,8 +115,8 @@ def test_a_missing_library_is_not_an_error(tmp_path):
 
 def test_each_library_has_its_own_index(tmp_path):
     """A search must not be able to reach the other profile's recordings."""
-    mine = library_with(tmp_path / "oleksandr", **{"2026-10-04/1": "my private words"})
-    hers = library_with(tmp_path / "erika", **{"2026-10-04/2": "her private words"})
+    mine = library_with(tmp_path / "mine", **{"2026-10-04/1": "my private words"})
+    hers = library_with(tmp_path / "hers", **{"2026-10-04/2": "her private words"})
 
     assert index.search(mine, "my") and not index.search(mine, "her private")
     assert index.search(hers, "her") and not index.search(hers, "my private")

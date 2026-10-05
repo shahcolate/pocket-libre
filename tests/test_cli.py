@@ -99,12 +99,12 @@ def test_usb_status_unknown_exits_nonzero(run_usb):
 
 
 TWO_PROFILES = {
-    "default_profile": "oleksandr",
+    "default_profile": "mine",
     "device": {"session_key": "SHAREDACCOUNT123"},
     "output": {"directory": "/library"},
     "profiles": {
-        "oleksandr": {"label": "Oleksandr", "address": "AA:BB:CC:DD:EE:01"},
-        "erika": {"label": "Erika", "address": "AA:BB:CC:DD:EE:02"},
+        "mine": {"label": "Mine", "address": "AA:BB:CC:DD:EE:01"},
+        "hers": {"label": "Hers", "address": "AA:BB:CC:DD:EE:02"},
     },
 }
 
@@ -126,10 +126,10 @@ def test_profiles_lists_each_recorder(with_config):
     with_config(TWO_PROFILES)
     result = CliRunner().invoke(cli_module.cli, ["profiles"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
-    assert "oleksandr" in result.output
-    assert "erika" in result.output
+    assert "mine" in result.output
+    assert "hers" in result.output
     # Separate libraries are the whole point: they must not share a directory.
-    assert "oleksandr" in result.output and "erika" in result.output
+    assert "mine" in result.output and "hers" in result.output
     assert "shared" in result.output  # session key falls back to [device]
 
 
@@ -176,7 +176,7 @@ def test_status_uses_the_selected_profiles_device(with_config, monkeypatch):
     with_config(TWO_PROFILES)
     recorder = StatusRecorder()
     monkeypatch.setattr(cli_module, "PocketCommander", recorder)
-    result = CliRunner().invoke(cli_module.cli, ["--profile", "erika", "status"])
+    result = CliRunner().invoke(cli_module.cli, ["--profile", "hers", "status"])
     assert result.exit_code == 0
     assert recorder.address == "AA:BB:CC:DD:EE:02"
 
@@ -211,7 +211,7 @@ def test_profiles_command_still_works_when_the_choice_is_ambiguous(with_config):
     with_config(ambiguous)
     result = CliRunner().invoke(cli_module.cli, ["profiles"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
-    assert "erika" in result.output
+    assert "hers" in result.output
 
 
 def test_setup_insists_on_a_profile_when_the_choice_is_ambiguous(with_config):
@@ -225,12 +225,12 @@ def test_setup_insists_on_a_profile_when_the_choice_is_ambiguous(with_config):
 def test_config_set_writes_into_a_profile_table(with_config):
     saved = with_config(dict(TWO_PROFILES))
     result = CliRunner().invoke(
-        cli_module.cli, ["config", "--set", "profiles.erika.address=NEW"],
+        cli_module.cli, ["config", "--set", "profiles.hers.address=NEW"],
     )
     assert result.exit_code == 0
-    assert saved["config"]["profiles"]["erika"]["address"] == "NEW"
+    assert saved["config"]["profiles"]["hers"]["address"] == "NEW"
     # The other profile is untouched.
-    assert saved["config"]["profiles"]["oleksandr"]["address"] == "AA:BB:CC:DD:EE:01"
+    assert saved["config"]["profiles"]["mine"]["address"] == "AA:BB:CC:DD:EE:01"
 
 
 def test_config_set_rejects_an_unplaceable_path(with_config):
@@ -245,11 +245,11 @@ def test_config_never_saves_a_profile_folded_config(with_config):
 
     saved = with_config(dict(TWO_PROFILES))
     result = CliRunner().invoke(
-        cli_module.cli, ["--profile", "erika", "config", "--set", "api.hf_token=hf_x"],
+        cli_module.cli, ["--profile", "hers", "config", "--set", "api.hf_token=hf_x"],
     )
     assert result.exit_code == 0
     assert cfg.EFFECTIVE_MARKER not in saved["config"]
-    assert saved["config"]["profiles"]["oleksandr"]["address"] == "AA:BB:CC:DD:EE:01"
+    assert saved["config"]["profiles"]["mine"]["address"] == "AA:BB:CC:DD:EE:01"
 
 
 def test_library_commands_report_a_missing_library_instead_of_crashing(
@@ -257,9 +257,9 @@ def test_library_commands_report_a_missing_library_instead_of_crashing(
 ):
     """A fresh profile has no library yet; that is not a stack trace."""
     config = {
-        "default_profile": "erika",
+        "default_profile": "hers",
         "output": {"directory": str(tmp_path / "nothing-here")},
-        "profiles": {"erika": {"address": "AA:01"}},
+        "profiles": {"hers": {"address": "AA:01"}},
     }
     with_config(config)
 

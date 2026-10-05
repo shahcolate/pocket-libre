@@ -8,17 +8,17 @@ from pocket_libre import export
 
 
 def test_a_stated_date_becomes_a_due_date():
-    item = export.ActionItem(task="Send the contract", owner="David",
+    item = export.ActionItem(task="Send the contract", owner="Grace",
                              deadline="2026-10-09")
     assert item.due_date == "2026-10-09"
-    assert item.as_checkbox() == "- [ ] David: Send the contract \U0001F4C5 2026-10-09"
+    assert item.as_checkbox() == "- [ ] Grace: Send the contract \U0001F4C5 2026-10-09"
 
 
 def test_a_vague_deadline_is_quoted_not_converted():
     """Turning "next Tuesday" into a date would be inventing someone's deadline."""
-    item = export.ActionItem(task="Call back", owner="Erika", deadline="next Tuesday")
+    item = export.ActionItem(task="Call back", owner="Ada", deadline="next Tuesday")
     assert item.due_date is None
-    assert item.as_checkbox() == "- [ ] Erika: Call back (said: next Tuesday)"
+    assert item.as_checkbox() == "- [ ] Ada: Call back (said: next Tuesday)"
 
 
 def test_no_deadline_means_no_date():
@@ -45,14 +45,14 @@ def test_a_date_inside_a_sentence_is_still_picked_up():
 
 def test_action_items_are_read_from_the_entities_analysis():
     items = export.action_items_from_entities({"action_items": [
-        {"owner": "David", "task": "Send it", "deadline": "2026-10-09"},
-        {"who": "Erika", "item": "Call back", "due": "soon"},
+        {"owner": "Grace", "task": "Send it", "deadline": "2026-10-09"},
+        {"who": "Ada", "item": "Call back", "due": "soon"},
         "Book the room",
         {"task": ""},
         12345,
     ]})
     assert [i.task for i in items] == ["Send it", "Call back", "Book the room"]
-    assert items[1].owner == "Erika"
+    assert items[1].owner == "Ada"
     assert items[1].deadline == "soon"
 
 
@@ -81,7 +81,7 @@ def test_rendered_actions_are_a_checkbox_list():
 
 TRANSCRIPT = (
     "[00:00] SPEAKER_01: we should call the supplier\n"
-    "[00:06] David: I will do it tomorrow\n"
+    "[00:06] Grace: I will do it tomorrow\n"
     "[01:02:03] SPEAKER_01: good\n"
 )
 
@@ -94,7 +94,7 @@ SUMMARY = (
 
 
 def test_speakers_come_from_the_transcript_in_spoken_order():
-    assert export.speakers_in_transcript(TRANSCRIPT) == ["SPEAKER_01", "David"]
+    assert export.speakers_in_transcript(TRANSCRIPT) == ["SPEAKER_01", "Grace"]
     assert export.speakers_in_transcript("no timestamps here") == []
 
 
@@ -118,15 +118,15 @@ def test_a_note_carries_what_is_known_and_nothing_else():
         transcript=TRANSCRIPT,
         summary=SUMMARY,
         actions=[export.ActionItem(task="Send it", deadline="2026-10-09")],
-        profile="erika",
+        profile="hers",
         language="it",
         today="2026-10-04",
     )
     assert title == "Supplier contract review"
     assert body.startswith("---\n")
-    assert "profile: erika" in body
+    assert "profile: hers" in body
     assert "language: it" in body
-    assert "speakers: [SPEAKER_01, David]" in body
+    assert "speakers: [SPEAKER_01, Grace]" in body
     assert "## Action items" in body
     # The summary's own title and appended transcript are not repeated.
     assert body.count("## Transcript") == 1
