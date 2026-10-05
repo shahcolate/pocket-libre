@@ -93,3 +93,182 @@ def test_usb_status_unknown_exits_nonzero(run_usb):
     result = run_usb(fake, "status")
     assert result.exit_code == 1
     assert "did not report a USB state" in result.output
+
+
+# ── Profile selection ───────────────────────────
+
+
+TWO_PROFILES = {
+    "default_profile": "mine",
+    "device": {"session_key": "SHAREDACCOUNT123"},
+    "output": {"directory": "/library"},
+    "profiles": {
+        "mine": {"label": "Mine", "address": "AA:BB:CC:DD:EE:01"},
+        "hers": {"label": "Hers", "address": "AA:BB:CC:DD:EE:02"},
+    },
+}
+
+
+@pytest.fixture
+def with_config(monkeypatch):
+    """Serve a fixed config to the CLI, and capture what any command would save."""
+    saved = {}
+
+    def _install(config):
+        monkeypatch.setattr(cli_module, "load_config", lambda: config)
+        monkeypatch.setattr(cli_module, "save_config", lambda c: saved.update({"config": c}))
+        return saved
+
+    return _install
+
+
+def test_profiles_lists_each_recorder(with_config):
+    with_config(TWO_PROFILES)
+    result = CliRunner().invoke(cli_module.cli, ["profiles"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "mine" in result.output
+    assert "hers" in result.output
+    # Separate libraries are the whole point: they must not share a directory.
+    assert "mine" in result.output and "hers" in result.output
+    assert "shared" in result.output  # session key falls back to [device]
+
+
+class StatusRecorder:
+    """A commander that answers `status` and records which address it was given.
+
+    Deliberately not a FakeCommander subclass: that one keeps a `get_state`
+    attribute, which would shadow the method `status` calls.
+    """
+
+    def __init__(self):
+        self.address = None
+
+    def __call__(self, address):
+        self.address = address
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def authenticate(self, session_key):
+        return True
+
+    async def get_battery(self):
+        return 80
+
+    async def get_firmware(self):
+        return "1.8"
+
+    async def get_storage(self):
+        return (15, 59634)
+
+    async def get_state(self):
+        return 0
+
+    async def set_time(self):
+        return True
+
+
+def test_status_uses_the_selected_profiles_device(with_config, monkeypatch):
+    with_config(TWO_PROFILES)
+    recorder = StatusRecorder()
+    monkeypatch.setattr(cli_module, "PocketCommander", recorder)
+    result = CliRunner().invoke(cli_module.cli, ["--profile", "hers", "status"])
+    assert result.exit_code == 0
+    assert recorder.address == "AA:BB:CC:DD:EE:02"
+
+
+def test_default_profile_is_used_when_none_given(with_config, monkeypatch):
+    with_config(TWO_PROFILES)
+    recorder = StatusRecorder()
+    monkeypatch.setattr(cli_module, "PocketCommander", recorder)
+    result = CliRunner().invoke(cli_module.cli, ["status"])
+    assert result.exit_code == 0
+    assert recorder.address == "AA:BB:CC:DD:EE:01"
+
+
+def test_unknown_profile_is_refused(with_config):
+    with_config(TWO_PROFILES)
+    result = CliRunner().invoke(cli_module.cli, ["--profile", "nobody", "status"])
+    assert result.exit_code != 0
+    assert "No profile named 'nobody'" in result.output
+
+
+def test_device_command_refuses_to_guess_between_profiles(with_config):
+    ambiguous = {k: v for k, v in TWO_PROFILES.items() if k != "default_profile"}
+    with_config(ambiguous)
+    result = CliRunner().invoke(cli_module.cli, ["status"])
+    assert result.exit_code != 0
+    assert "no default" in result.output
+
+
+def test_profiles_command_still_works_when_the_choice_is_ambiguous(with_config):
+    """'profiles' is what you run to fix the ambiguity, so it must not need it resolved."""
+    ambiguous = {k: v for k, v in TWO_PROFILES.items() if k != "default_profile"}
+    with_config(ambiguous)
+    result = CliRunner().invoke(cli_module.cli, ["profiles"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert "hers" in result.output
+
+
+def test_setup_insists_on_a_profile_when_the_choice_is_ambiguous(with_config):
+    ambiguous = {k: v for k, v in TWO_PROFILES.items() if k != "default_profile"}
+    with_config(ambiguous)
+    result = CliRunner().invoke(cli_module.cli, ["setup"])
+    assert result.exit_code != 0
+    assert "--profile" in result.output
+
+
+def test_config_set_writes_into_a_profile_table(with_config):
+    saved = with_config(dict(TWO_PROFILES))
+    result = CliRunner().invoke(
+        cli_module.cli, ["config", "--set", "profiles.hers.address=NEW"],
+    )
+    assert result.exit_code == 0
+    assert saved["config"]["profiles"]["hers"]["address"] == "NEW"
+    # The other profile is untouched.
+    assert saved["config"]["profiles"]["mine"]["address"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_config_set_rejects_an_unplaceable_path(with_config):
+    with_config(dict(TWO_PROFILES))
+    result = CliRunner().invoke(cli_module.cli, ["config", "--set", "a.b.c.d=1"])
+    assert result.exit_code != 0
+
+
+def test_config_never_saves_a_profile_folded_config(with_config):
+    """Saving the folded view would flatten one profile over the globals."""
+    from pocket_libre import config as cfg
+
+    saved = with_config(dict(TWO_PROFILES))
+    result = CliRunner().invoke(
+        cli_module.cli, ["--profile", "hers", "config", "--set", "api.hf_token=hf_x"],
+    )
+    assert result.exit_code == 0
+    assert cfg.EFFECTIVE_MARKER not in saved["config"]
+    assert saved["config"]["profiles"]["mine"]["address"] == "AA:BB:CC:DD:EE:01"
+
+
+def test_library_commands_report_a_missing_library_instead_of_crashing(
+    with_config, tmp_path,
+):
+    """A fresh profile has no library yet; that is not a stack trace."""
+    config = {
+        "default_profile": "hers",
+        "output": {"directory": str(tmp_path / "nothing-here")},
+        "profiles": {"hers": {"address": "AA:01"}},
+    }
+    with_config(config)
+
+    for args in (
+        ["export", "--to", str(tmp_path / "out")],
+        ["search", "anything"],
+        ["tasks"],
+    ):
+        result = CliRunner().invoke(cli_module.cli, args)
+        assert result.exit_code != 0, args
+        assert "No library at" in result.output, args
+        assert not isinstance(result.exception, FileNotFoundError), args

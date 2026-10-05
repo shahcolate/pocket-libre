@@ -1,6 +1,7 @@
 """FastAPI web interface for Pocket Libre."""
 
 import asyncio
+import functools
 import json
 import re
 from datetime import datetime
@@ -15,15 +16,22 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
+from pocket_libre.backends import options_from_config, transcribe_and_label
 from pocket_libre.commands import PocketCommander, Recording
 from pocket_libre.config import (
+    PROFILES_SECTION,
+    effective_config,
     get,
     get_output_dir,
     load_config,
+    profile_accent,
+    profile_key_for,
+    profile_label,
     resolve_address,
     resolve_anthropic_key,
     resolve_hf_token,
     resolve_session_key,
+    resolve_web_port,
     save_config,
 )
 from pocket_libre.protocol import MP3_SYNC_WORD
@@ -32,6 +40,27 @@ app = FastAPI(title="Pocket Libre")
 
 STATIC_DIR = Path(__file__).parent / "static"
 ble_lock = asyncio.Lock()
+
+# Set once, before the server starts serving. Every request resolves against
+# it, so a server raised for one profile has no route to another profile's
+# recordings: the config it sees describes exactly one device and one library.
+_active_profile: str | None = None
+
+
+def set_active_profile(name: str | None) -> None:
+    """Bind this server to one profile. Call before serving."""
+    global _active_profile
+    _active_profile = name
+
+
+def active_profile_name() -> str | None:
+    """Which profile this server is bound to, or None for a single-device config."""
+    return _active_profile
+
+
+def current_config() -> dict:
+    """The config as this server sees it: the active profile, folded down."""
+    return effective_config(load_config(), _active_profile)
 
 
 # ── Path safety ─────────────────────────────────
@@ -83,7 +112,7 @@ class ConfigUpdate(BaseModel):
 
 @app.get("/api/config")
 async def get_config():
-    config = load_config()
+    config = current_config()
     # Mask sensitive keys
     safe = {}
     for section, values in config.items():
@@ -102,19 +131,44 @@ async def get_config():
     return safe
 
 
+@app.get("/api/profile")
+async def get_profile():
+    """Who this server belongs to, for the header, the title and the accent.
+
+    Two identical tabs on adjacent ports is how someone ends up reading the
+    wrong person's transcript, so the UI always says whose library it is.
+    """
+    config = load_config()
+    name = _active_profile
+    return {
+        "name": name,
+        "label": profile_label(config, name),
+        "accent": profile_accent(config, name) if name else None,
+        "library": get_output_dir(config, profile=name),
+        "port": resolve_web_port(config, profile=name),
+    }
+
+
 @app.put("/api/config")
 async def update_config(update: ConfigUpdate):
+    # Written against the file as stored, never the folded view: saving that
+    # would flatten this profile over the globals and drop the others. With a
+    # profile active, every edit lands in that profile's own table.
     config = load_config()
     for section in ("device", "api", "output", "defaults"):
         new_vals = getattr(update, section)
-        if new_vals:
-            if section not in config:
-                config[section] = {}
-            for k, v in new_vals.items():
-                # Don't overwrite keys with masked values
-                if isinstance(v, str) and v.startswith("..."):
-                    continue
-                config[section][k] = v
+        if not new_vals:
+            continue
+        if _active_profile:
+            table = (config.setdefault(PROFILES_SECTION, {})
+                     .setdefault(_active_profile, {}))
+        else:
+            table = config.setdefault(section, {})
+        for k, v in new_vals.items():
+            # Don't overwrite keys with masked values
+            if isinstance(v, str) and v.startswith("..."):
+                continue
+            table[profile_key_for(section, k) if _active_profile else k] = v
     save_config(config)
     return {"status": "ok"}
 
@@ -160,7 +214,7 @@ async def device_busy():
 
 @app.get("/api/device/status")
 async def device_status():
-    config = load_config()
+    config = current_config()
     address, sk = _require_device(config)
 
     if ble_lock.locked():
@@ -196,7 +250,7 @@ async def device_status():
 
 @app.get("/api/device/recordings")
 async def device_recordings():
-    config = load_config()
+    config = current_config()
     address, sk = _require_device(config)
 
     if ble_lock.locked():
@@ -231,7 +285,7 @@ async def device_recordings():
 @app.get("/api/download/{date}/{timestamp}")
 async def download_recording(date: str, timestamp: str):
     """Download a recording over BLE with SSE progress updates."""
-    config = load_config()
+    config = current_config()
     address, sk = _require_device(config)
     out_root = Path(get_output_dir(config))
     out_path = _recording_path(out_root, date, timestamp, ".mp3")
@@ -298,7 +352,7 @@ async def download_recording(date: str, timestamp: str):
 @app.get("/api/process/{date}/{timestamp}")
 async def process_recording(date: str, timestamp: str):
     """Download, transcribe, and summarize with SSE progress."""
-    config = load_config()
+    config = current_config()
     out_root = Path(get_output_dir(config))
     audio_path = _recording_path(out_root, date, timestamp, ".mp3")
     # Device access is only needed when the audio isn't on disk yet;
@@ -364,35 +418,32 @@ async def process_recording(date: str, timestamp: str):
         else:
             yield _sse({"step": "download", "progress": 100, "message": "Already downloaded"})
 
-        # Transcribe (runs in thread to not block)
-        yield _sse({"step": "transcribe", "message": f"Loading Whisper ({whisper_model})..."})
+        # Transcribe and attach speakers (in a thread, so the loop keeps serving)
+        options = options_from_config(config, whisper_model)
+        yield _sse({"step": "transcribe",
+                    "message": f"Transcribing ({options['backend']}, {options['model']})..."})
 
         try:
-            import whisper
             loop = asyncio.get_event_loop()
-            model = await loop.run_in_executor(None, whisper.load_model, whisper_model)
-            yield _sse({"step": "transcribe", "message": "Transcribing..."})
-            result = await loop.run_in_executor(None, lambda: model.transcribe(str(audio_path), verbose=False))
-            segments = result.get("segments", [])
-            yield _sse({"step": "transcribe", "message": f"Transcribed: {len(segments)} segments"})
-        except ImportError:
-            yield _sse({"step": "error", "message": "Whisper not installed. Run: pip install openai-whisper"})
-            return
+            labeled, transcription = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    transcribe_and_label, audio_path,
+                    hf_token=hf_token, anthropic_key=anthropic_key,
+                    library_dir=out_root,
+                    voices_path=rec_dir / f"{timestamp}_voices.json",
+                    **options,
+                ),
+            )
         except Exception as e:
             yield _sse({"step": "error", "message": f"Transcription failed: {e}"})
             return
 
-        # Diarize
-        yield _sse({"step": "diarize", "message": "Identifying speakers..."})
-        try:
-            from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
-
-            speaker_segments = await loop.run_in_executor(
-                None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
-            )
-            labeled = merge_transcript_with_speakers(segments, speaker_segments)
-        except Exception:
-            labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
+        detected = f" ({transcription.language})" if transcription.language else ""
+        yield _sse({"step": "transcribe",
+                    "message": f"Transcribed: {len(labeled)} segments{detected}"})
+        yield _sse({"step": "diarize",
+                    "message": "Speakers: " + (", ".join(transcription.speakers) or "one")})
 
         from pocket_libre.summarize import format_transcript_for_summary
         transcript_text = format_transcript_for_summary(labeled)
@@ -436,10 +487,11 @@ async def process_recording(date: str, timestamp: str):
 @app.get("/api/sync-all")
 async def sync_all():
     """Download all new recordings, transcribe, and summarize. SSE progress."""
-    config = load_config()
+    config = current_config()
     address, sk = _require_device(config)
     out_root = Path(get_output_dir(config))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
+    options = options_from_config(config, whisper_model)
     summary_style = get(config, "defaults", "summary_style", default="meeting")
     anthropic_key = resolve_anthropic_key(config)
     hf_token = resolve_hf_token(config)
@@ -528,33 +580,28 @@ async def sync_all():
         for i, (rec, audio_path) in enumerate(downloaded, 1):
             rec_dir = audio_path.parent
 
-            # Transcribe
-            yield _sse({"step": "transcribe", "recording": i, "total": total, "message": "Transcribing..."})
+            # Transcribe and attach speakers
+            yield _sse({"step": "transcribe", "recording": i, "total": total,
+                        "message": f"Transcribing ({options['backend']})..."})
             try:
-                import whisper
                 loop = asyncio.get_event_loop()
-                model = await loop.run_in_executor(None, whisper.load_model, whisper_model)
-                result = await loop.run_in_executor(
+                labeled, transcription = await loop.run_in_executor(
                     None,
-                    lambda m=model, p=audio_path: m.transcribe(str(p), verbose=False),
+                    functools.partial(
+                        transcribe_and_label, audio_path,
+                        hf_token=hf_token, anthropic_key=anthropic_key,
+                        library_dir=out_root,
+                        voices_path=rec_dir / f"{rec.timestamp}_voices.json",
+                        **options,
+                    ),
                 )
-                segments = result.get("segments", [])
+                detected = f" ({transcription.language})" if transcription.language else ""
                 yield _sse({"step": "transcribe", "recording": i, "total": total,
-                            "message": f"{len(segments)} segments"})
+                            "message": f"{len(labeled)} segments{detected}"})
             except Exception as e:
                 yield _sse({"step": "transcribe", "recording": i, "total": total,
                             "message": f"Failed: {e}"})
                 continue
-
-            # Diarize
-            try:
-                from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
-                speaker_segments = await loop.run_in_executor(
-                    None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
-                )
-                labeled = merge_transcript_with_speakers(segments, speaker_segments)
-            except Exception:
-                labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
 
             from pocket_libre.summarize import format_transcript_for_summary
             transcript_text = format_transcript_for_summary(labeled)
@@ -614,7 +661,7 @@ async def sync_all():
 
 @app.get("/api/local/recordings")
 async def local_recordings():
-    config = load_config()
+    config = current_config()
     out_root = Path(get_output_dir(config))
 
     if not out_root.exists():
@@ -644,9 +691,32 @@ async def local_recordings():
     return recordings
 
 
+@app.get("/api/search")
+async def search_recordings(q: str = "", limit: int = 20, kind: str = ""):
+    """Full-text search across this profile's library.
+
+    The index lives inside the library, so a search cannot reach another
+    profile's recordings.
+    """
+    from pocket_libre.index import search
+
+    config = current_config()
+    out_root = Path(get_output_dir(config))
+    if not q.strip() or not out_root.is_dir():
+        return []
+
+    kinds = tuple(k for k in kind.split(",") if k.strip()) or None
+    hits = search(out_root, q, limit=max(1, min(int(limit), 100)), kinds=kinds)
+    return [
+        {"date": hit.date, "timestamp": hit.timestamp, "kind": hit.kind,
+         "snippet": hit.snippet, "session_id": hit.reference}
+        for hit in hits
+    ]
+
+
 @app.get("/api/local/{date}/{timestamp}/transcript")
 async def get_transcript(date: str, timestamp: str):
-    config = load_config()
+    config = current_config()
     path = _recording_path(Path(get_output_dir(config)), date, timestamp, "_transcript.txt")
     if not path.exists():
         raise HTTPException(404, "Transcript not found")
@@ -655,7 +725,7 @@ async def get_transcript(date: str, timestamp: str):
 
 @app.get("/api/local/{date}/{timestamp}/summary")
 async def get_summary(date: str, timestamp: str):
-    config = load_config()
+    config = current_config()
     path = _recording_path(Path(get_output_dir(config)), date, timestamp, "_summary.md")
     if not path.exists():
         raise HTTPException(404, "Summary not found")
@@ -664,7 +734,7 @@ async def get_summary(date: str, timestamp: str):
 
 @app.get("/api/local/{date}/{timestamp}/audio")
 async def get_audio(date: str, timestamp: str):
-    config = load_config()
+    config = current_config()
     path = _recording_path(Path(get_output_dir(config)), date, timestamp, ".mp3")
     if not path.exists():
         raise HTTPException(404, "Audio file not found")
@@ -681,7 +751,7 @@ class ChatRequest(BaseModel):
 @app.post("/api/chat/{date}/{timestamp}")
 async def chat_recording(date: str, timestamp: str, body: ChatRequest):
     """Ask a question about a recording's transcript."""
-    config = load_config()
+    config = current_config()
     anthropic_key = resolve_anthropic_key(config)
     if not anthropic_key:
         raise HTTPException(400, "No Anthropic API key configured. Add one in Settings.")
@@ -705,7 +775,7 @@ async def chat_recording(date: str, timestamp: str, body: ChatRequest):
 @app.get("/api/local/{date}/{timestamp}/analyses")
 async def get_analyses(date: str, timestamp: str):
     """Get all analysis results for a recording."""
-    config = load_config()
+    config = current_config()
     rec_dir = _recording_path(Path(get_output_dir(config)), date, timestamp, "").parent
     if not rec_dir.exists():
         raise HTTPException(404, "Recording not found")
@@ -718,7 +788,7 @@ async def get_analyses(date: str, timestamp: str):
 @app.post("/api/analyze/{date}/{timestamp}")
 async def run_analysis(date: str, timestamp: str):
     """Run AI analyses on an already-transcribed recording."""
-    config = load_config()
+    config = current_config()
     anthropic_key = resolve_anthropic_key(config)
     if not anthropic_key:
         raise HTTPException(400, "No Anthropic API key configured.")

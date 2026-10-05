@@ -20,6 +20,7 @@ async def run_sync(
     anthropic_key: str | None = None,
     skip_summary: bool = False,
     custom_prompt: str | None = None,
+    backend_options: dict | None = None,
 ):
     """Full pipeline: capture audio, transcribe, diarize, summarize.
 
@@ -80,30 +81,28 @@ async def run_sync(
     # ── Step 2: Transcribe ─────────────────────────────────
     console.print("\n[bold cyan]Step 2/4: Transcribing...[/bold cyan]\n")
 
+    from pocket_libre.backends import TranscriptionError, transcribe_and_label
+
+    options = dict(backend_options or {})
+    options.setdefault("model", whisper_model)
     try:
-        import whisper
-    except ImportError:
-        console.print("[red]Whisper not installed. Skipping transcription.[/red]")
+        labeled_segments, transcription = transcribe_and_label(
+            audio_path, hf_token=hf_token, anthropic_key=anthropic_key, **options,
+        )
+    except TranscriptionError as e:
+        console.print(f"[red]{e}[/red]")
         return str(session_dir)
 
-    model = whisper.load_model(whisper_model)
-    result = model.transcribe(str(audio_path), verbose=False)
-
-    segments = result.get("segments", [])
-
-    console.print(f"[green]Transcribed: {len(segments)} segments[/green]")
+    detected = f", language {transcription.language}" if transcription.language else ""
+    console.print(
+        f"[green]Transcribed: {len(labeled_segments)} segments{detected}[/green]"
+    )
 
     # ── Step 3: Speaker diarization ────────────────────────
     console.print("\n[bold cyan]Step 3/4: Identifying speakers...[/bold cyan]\n")
-
-    from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
-
-    speaker_segments = diarize_auto(
-        segments, audio_path=str(audio_path),
-        hf_token=hf_token, anthropic_key=anthropic_key,
+    console.print(
+        f"[green]Speakers: {', '.join(transcription.speakers) or 'one'}[/green]"
     )
-
-    labeled_segments = merge_transcript_with_speakers(segments, speaker_segments)
 
     # Build transcript text
     from pocket_libre.summarize import format_transcript_for_summary

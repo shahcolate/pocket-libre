@@ -102,6 +102,81 @@ async def watch_loop(
     return stats
 
 
+@dataclass
+class WatchTarget:
+    """One recorder to watch: a profile name, its address, and how to sync it."""
+
+    name: str
+    address: str
+    sync_once: Callable[[], Awaitable[int]]
+
+
+async def watch_many(
+    targets: list[WatchTarget],
+    poll_interval: float = 60.0,
+    presence_check: Callable[[str], Awaitable[bool]] | None = None,
+    max_iterations: int | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> dict[str, WatchStats]:
+    """Poll several recorders, one at a time, and sync whichever is present.
+
+    Strictly sequential: the Pocket accepts a single BLE connection, and one
+    adapter cannot scan for two devices at once. Each target keeps its own
+    backoff, so one recorder being away all day does not slow down the scan
+    rate of the one on the desk.
+
+    Time only advances through `sleep`, which the caller can replace to drive
+    the loop deterministically in tests.
+    """
+    check = presence_check or device_present
+    stats = {t.name: WatchStats() for t in targets}
+    backoff = {t.name: 0.0 for t in targets}
+    due = {t.name: 0.0 for t in targets}
+    now = 0.0
+    rounds = 0
+
+    while targets and (max_iterations is None or rounds < max_iterations):
+        rounds += 1
+        ready = [t for t in targets if due[t.name] <= now]
+
+        for target in ready:
+            current = stats[target.name]
+            current.scans += 1
+            if await check(target.address):
+                console.print(f"[green]{target.name}: device found — syncing...[/green]")
+                current.sync_runs += 1
+                try:
+                    count = await target.sync_once()
+                    current.recordings_synced += count
+                    if count:
+                        console.print(
+                            f"[bold green]{target.name}: synced {count} new "
+                            "recording(s).[/bold green]"
+                        )
+                    else:
+                        console.print(f"[dim]{target.name}: nothing new.[/dim]")
+                except Exception as e:
+                    current.failures += 1
+                    console.print(f"[yellow]{target.name}: sync failed: {e}[/yellow]")
+                # Clear the backoff so the next miss starts from the base
+                # interval again rather than from wherever it had grown to.
+                backoff[target.name] = 0.0
+                due[target.name] = now + poll_interval
+            else:
+                backoff[target.name] = next_backoff(backoff[target.name], poll_interval)
+                due[target.name] = now + backoff[target.name]
+                console.print(
+                    f"[dim]{target.name}: not found. "
+                    f"Next check in {backoff[target.name]:.0f}s.[/dim]"
+                )
+
+        step = max(min(due.values()) - now, 0.0)
+        await sleep(step)
+        now += step
+
+    return stats
+
+
 async def sync_new_recordings(
     address: str,
     session_key: str,
@@ -111,6 +186,7 @@ async def sync_new_recordings(
     summary_style: str = "meeting",
     anthropic_key: str | None = None,
     hf_token: str | None = None,
+    backend_options: dict | None = None,
 ) -> int:
     """Download every recording not already on disk. Returns the count."""
     from pocket_libre.commands import PocketCommander, download_with_retry
@@ -150,6 +226,7 @@ async def sync_new_recordings(
                 _process_recording(
                     audio_path, rec.timestamp, rec_dir,
                     whisper_model, summary_style, anthropic_key, hf_token,
+                    backend_options, out_root,
                 )
             except Exception as e:
                 console.print(f"[yellow]Processing failed for {rec.timestamp}: {e}[/yellow]")
@@ -165,28 +242,21 @@ def _process_recording(
     summary_style: str,
     anthropic_key: str | None,
     hf_token: str | None,
+    backend_options: dict | None = None,
+    library_dir: Path | None = None,
 ) -> None:
     """Transcribe, diarize, and summarize one downloaded recording."""
-    import whisper
-
-    from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
+    from pocket_libre.backends import transcribe_and_label
     from pocket_libre.summarize import format_transcript_for_summary
 
-    model = whisper.load_model(whisper_model)
-    result = model.transcribe(str(audio_path), verbose=False)
-    segments = result.get("segments", [])
-
-    try:
-        speakers = diarize_auto(
-            segments, audio_path=str(audio_path),
-            hf_token=hf_token, anthropic_key=anthropic_key,
-        )
-        labeled = merge_transcript_with_speakers(segments, speakers)
-    except Exception:
-        labeled = [
-            {"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]}
-            for s in segments
-        ]
+    options = dict(backend_options or {})
+    options.setdefault("model", whisper_model)
+    labeled, _result = transcribe_and_label(
+        audio_path, hf_token=hf_token, anthropic_key=anthropic_key,
+        library_dir=library_dir,
+        voices_path=rec_dir / f"{timestamp}_voices.json",
+        **options,
+    )
 
     transcript_text = format_transcript_for_summary(labeled)
     (rec_dir / f"{timestamp}_transcript.txt").write_text(transcript_text, encoding="utf-8")

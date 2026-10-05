@@ -1,24 +1,47 @@
 """CLI entry point for Pocket Libre."""
 
 import asyncio
+import functools
 import os
 from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 
+from pocket_libre.backends import (
+    BACKENDS,
+    DEFAULT_BACKEND,
+    DEFAULT_LOCAL_MODEL,
+    LOCAL_BACKEND,
+    TranscriptionError,
+    find_faster_whisper,
+    options_from_config,
+    transcribe_and_label,
+)
 from pocket_libre.capture import capture_audio
 from pocket_libre.commands import PocketCommander, Recording
 from pocket_libre.config import (
     CONFIG_FILE,
+    PROFILES_SECTION,
+    VALID_PROFILE_NAME,
+    ProfileError,
+    active_profile,
+    effective_config,
     get,
     get_output_dir,
+    list_profiles,
     load_config,
+    profile_key_for,
+    profile_label,
+    profile_warnings,
     resolve_address,
     resolve_anthropic_key,
     resolve_hf_token,
+    resolve_profile_name,
     resolve_session_key,
+    resolve_web_port,
     save_config,
 )
 from pocket_libre.explorer import explore_device
@@ -30,12 +53,46 @@ from pocket_libre.transcribe import transcribe_audio
 console = Console()
 
 
+def _due_marker() -> str:
+    """The calendar emoji, unless this console cannot encode it.
+
+    A Windows console on a legacy code page raises while printing it, and
+    crashing halfway through a task list is a silly way to lose one. Files are
+    always written UTF-8, so only the console needs the plainer marker.
+    """
+    marker = "📅"
+    encoding = getattr(console.file, "encoding", None) or "utf-8"
+    try:
+        marker.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return "due"
+    return marker
+
+
+def _require_resolved_profile(ctx) -> None:
+    """Raise the deferred profile error for a command that does need a device."""
+    if ctx.obj.get("profile_error"):
+        raise click.UsageError(ctx.obj["profile_error"])
+
+
+def _for_profile(config: dict) -> str:
+    """' for profile <name>', or nothing when no profile is active."""
+    name = active_profile(config)
+    return f" for profile '{name}'" if name else ""
+
+
+def _setup_hint(config: dict) -> str:
+    name = active_profile(config)
+    return f"pocket-libre setup --profile {name}" if name else "pocket-libre setup"
+
+
 def _require_address(address: str | None, config: dict) -> str:
     """Resolve device address or exit with helpful error."""
     addr = resolve_address(config, address)
     if not addr:
         raise click.UsageError(
-            "No device address. Run 'pocket-libre setup' or pass --address.\n"
+            f"No device address{_for_profile(config)}. "
+            f"Run '{_setup_hint(config)}' or pass --address.\n"
             "Find your device with: pocket-libre scan --filter pkt"
         )
     return addr
@@ -46,7 +103,8 @@ def _require_session_key(session_key: str | None, config: dict) -> str:
     sk = resolve_session_key(config, session_key)
     if not sk:
         raise click.UsageError(
-            "No session key. Run 'pocket-libre setup' or pass --key.\n"
+            f"No session key{_for_profile(config)}. "
+            f"Run '{_setup_hint(config)}' or pass --key.\n"
             "Capture yours from the vendor app's APP&SK& write (see PROTOCOL.md)."
         )
     return sk
@@ -64,37 +122,127 @@ def _prompt_secret(label: str, existing: str) -> str | None:
     return None
 
 
+# Commands that touch no device and no library, so an unresolved profile must
+# not stop them: these are what you run to inspect or repair the config.
+PROFILE_OPTIONAL_COMMANDS = frozenset({
+    "search", "reindex", "export", "tasks",
+    # "speakers" works on the library, not the device, but it still needs to
+    # know which library, so its subcommands resolve the profile themselves.
+    "speakers",
+    # "watch" and "web" belong here only because of their --all form, which
+    # needs no single profile; both re-raise the error when --all is absent.
+    "watch", "web",
+    "profiles", "config", "setup", "scan", "transcribe", "convert", "wifi-discover",
+})
+
+
 @click.group()
 @click.version_option()
+@click.option("--profile", "-p", "profile_name", default=None, metavar="NAME",
+              help="Which recorder to act on. Defaults to default_profile, "
+                   "or the only profile when there is just one.")
 @click.pass_context
-def cli(ctx):
+def cli(ctx, profile_name: str | None):
     """Pocket Libre: Liberate your Pocket AI recorder from the cloud."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config()
+    raw = load_config()
+    active = None
+    ctx.obj["profile_error"] = None
+    try:
+        active = resolve_profile_name(raw, profile_name)
+    except ProfileError as e:
+        # Deferred, not swallowed: a command that needs a device still fails,
+        # but 'profiles' and 'config' have to stay reachable to fix this.
+        if ctx.invoked_subcommand not in PROFILE_OPTIONAL_COMMANDS:
+            raise click.UsageError(str(e)) from e
+        ctx.obj["profile_error"] = str(e)
+
+    # `config` is the profile folded down into the global sections, so no
+    # command below can reach another profile's device or library. `raw_config`
+    # is the file as written, and is the only thing ever saved back.
+    ctx.obj["raw_config"] = raw
+    ctx.obj["profile"] = active
+    ctx.obj["config"] = effective_config(raw, active)
 
 
 # ── Setup & Config ──────────────────────────────
 
 
+class _SetupTarget:
+    """Where the wizard reads and writes: the global sections, or one profile.
+
+    A profile table is flat, so `(section, key)` is translated to the name that
+    setting takes inside a profile. Keeps the wizard's prompts identical either
+    way instead of forking it.
+    """
+
+    def __init__(self, config: dict, profile: str | None = None):
+        self.config = config
+        self.profile = profile
+        self.table: dict = {}
+        if profile:
+            profiles = config.setdefault(PROFILES_SECTION, {})
+            self.table = profiles.setdefault(profile, {})
+
+    def get(self, section: str, key: str, default=""):
+        if self.profile:
+            return self.table.get(profile_key_for(section, key), default)
+        return self.config.get(section, {}).get(key, default)
+
+    def set(self, section: str, key: str, value):
+        if self.profile:
+            self.table[profile_key_for(section, key)] = value
+        else:
+            self.config.setdefault(section, {})[key] = value
+
+
 @cli.command()
+@click.option("--profile", "-p", "profile_name", default=None, metavar="NAME",
+              help="Configure this profile, creating it if it does not exist. "
+                   "Omit to configure the single-device defaults.")
 @click.pass_context
-def setup(ctx):
+def setup(ctx, profile_name: str | None):
     """Interactive setup wizard. Configures device, API keys, and preferences."""
+    target_profile = (profile_name or ctx.obj["profile"] or "").strip().lower()
+    if not target_profile and ctx.obj.get("profile_error"):
+        # Falling through here would edit the global section while the user
+        # believes they are configuring one of their recorders.
+        raise click.UsageError(
+            f"{ctx.obj['profile_error']}\n"
+            "Say which one to configure: pocket-libre setup --profile <name>"
+        )
+    if target_profile and not VALID_PROFILE_NAME.match(target_profile):
+        raise click.UsageError(
+            f"{target_profile!r} is not a usable profile name. Use lowercase "
+            "letters, digits, '-' or '_', starting with a letter or digit."
+        )
+
+    scope = (f"profile [bold]{target_profile}[/bold]" if target_profile
+             else "the default (single-device) settings")
     console.print(Panel(
         "[bold]Pocket Libre Setup[/bold]\n\n"
-        "This will configure your device address, API keys, and preferences.\n"
+        f"Configuring {scope}: device address, API keys, and preferences.\n"
         "Settings are saved to ~/.pocket-libre/config.toml\n"
         "Press Enter to accept defaults. Leave blank to skip.",
         border_style="cyan",
     ))
 
-    config = ctx.obj["config"]
+    # The file as written, never the profile-folded view: saving that back would
+    # flatten one profile over the global settings and drop the others.
+    config = ctx.obj["raw_config"]
     # Carry over every existing section so re-running setup never wipes
     # settings the wizard doesn't manage (e.g. [analysis]).
-    new_config = {section: dict(values) for section, values in config.items()
-                  if isinstance(values, dict)}
+    new_config = {section: (dict(values) if isinstance(values, dict) else values)
+                  for section, values in config.items()}
+    if PROFILES_SECTION in new_config:
+        new_config[PROFILES_SECTION] = {
+            name: dict(table) for name, table in new_config[PROFILES_SECTION].items()
+            if isinstance(table, dict)
+        }
     for section in ("device", "api", "output", "defaults"):
         new_config.setdefault(section, {})
+
+    target = _SetupTarget(new_config, target_profile or None)
 
     # Step 1: Device address
     console.print("\n[bold cyan]Step 1: Device Address[/bold cyan]")
@@ -109,28 +257,40 @@ def setup(ctx):
                 pocket_devices.append(d)
                 console.print(f"  Found: [green]{d.name}[/green] ({d.address})")
 
-        if pocket_devices:
-            default_addr = pocket_devices[0].address
+        taken = {
+            str(table.get("address", "")).strip().upper()
+            for name, table in list_profiles(new_config).items()
+            if name != target_profile
+        }
+        unclaimed = [d for d in pocket_devices if d.address.strip().upper() not in taken]
+        if taken and len(pocket_devices) != len(unclaimed):
+            console.print("  [dim]Skipping devices already assigned to another profile.[/dim]")
+
+        if unclaimed:
+            default_addr = unclaimed[0].address
             console.print(f"\n  [dim]Auto-detected: {default_addr}[/dim]")
         else:
-            default_addr = new_config["device"].get("address", "")
-            if not default_addr:
+            default_addr = target.get("device", "address", "")
+            if not pocket_devices:
                 console.print("  [yellow]No Pocket device found. Make sure it's awake (press button).[/yellow]")
     except Exception:
-        default_addr = new_config["device"].get("address", "")
+        default_addr = target.get("device", "address", "")
         console.print("  [yellow]BLE scan failed. You can enter the address manually.[/yellow]")
 
     addr = click.prompt("  Device address", default=default_addr or "", show_default=bool(default_addr))
     if addr:
-        new_config["device"]["address"] = addr
+        target.set("device", "address", addr)
 
     console.print("\n  [bold]Session Key[/bold] (16 characters, authenticates the BLE connection)")
     console.print("  [dim]Capture it from the vendor app's APP&SK& write — see PROTOCOL.md.[/dim]")
-    sk = _prompt_secret("  Session key", new_config["device"].get("session_key", ""))
+    if target_profile:
+        console.print("  [dim]The key is issued per vendor account, not per device: leave this "
+                      "blank to reuse the one already in [device].[/dim]")
+    sk = _prompt_secret("  Session key", target.get("device", "session_key", ""))
     if sk:
         if len(sk) != 16:
             console.print("  [yellow]Warning: session keys are 16 characters — double-check the value.[/yellow]")
-        new_config["device"]["session_key"] = sk
+        target.set("device", "session_key", sk)
 
     # Step 2: API keys
     console.print("\n[bold cyan]Step 2: API Keys[/bold cyan]")
@@ -139,53 +299,125 @@ def setup(ctx):
     console.print("  [dim]Get one at: https://console.anthropic.com/settings/keys[/dim]")
     console.print("  [dim]Cost: ~$0.003 per recording (summary + entities + mind map)[/dim]")
     console.print("  [dim]Transcription works without this key (runs locally).[/dim]")
-    anthropic_key = _prompt_secret("  Anthropic API key", new_config["api"].get("anthropic_key", ""))
+    anthropic_key = _prompt_secret("  Anthropic API key", target.get("api", "anthropic_key", ""))
     if anthropic_key:
-        new_config["api"]["anthropic_key"] = anthropic_key
+        target.set("api", "anthropic_key", anthropic_key)
 
     console.print("\n  [bold]HuggingFace Token[/bold] (optional, for speaker identification)")
     console.print("  [dim]Get one at: https://huggingface.co/settings/tokens[/dim]")
     console.print("  [dim]Free tier works. Enables speaker diarization.[/dim]")
-    hf_token = _prompt_secret("  HuggingFace token", new_config["api"].get("hf_token", ""))
+    hf_token = _prompt_secret("  HuggingFace token", target.get("api", "hf_token", ""))
     if hf_token:
-        new_config["api"]["hf_token"] = hf_token
+        target.set("api", "hf_token", hf_token)
 
     # Step 3: Output directory
     console.print("\n[bold cyan]Step 3: Output Directory[/bold cyan]")
-    default_dir = new_config["output"].get("directory", "~/Pocket Libre")
+    default_dir = get_output_dir(new_config, profile=target_profile or None)
     out_dir = click.prompt("  Save recordings to", default=default_dir)
-    new_config["output"]["directory"] = out_dir
+    target.set("output", "directory", out_dir)
 
     # Step 4: Defaults
     console.print("\n[bold cyan]Step 4: Preferences[/bold cyan]")
-    default_style = new_config["defaults"].get("summary_style", "meeting")
+    default_style = target.get("defaults", "summary_style", "") or "meeting"
     style = click.prompt(
         "  Summary style",
         type=click.Choice(["meeting", "notes", "call", "raw"]),
         default=default_style,
     )
-    new_config["defaults"]["summary_style"] = style
+    target.set("defaults", "summary_style", style)
 
-    default_model = new_config["defaults"].get("whisper_model", "base.en")
-    model = click.prompt(
-        "  Whisper model",
-        type=click.Choice(["tiny.en", "base.en", "small.en", "medium.en", "large"]),
-        default=default_model,
+    found_local = find_faster_whisper(target.get("defaults", "faster_whisper_path", ""))
+    default_backend = (target.get("defaults", "transcribe_backend", "")
+                       or (LOCAL_BACKEND if found_local else DEFAULT_BACKEND))
+    console.print(
+        "\n  [bold]Transcription backend[/bold]\n"
+        "  [dim]openai-whisper runs in this process: English models by default, "
+        "no speaker labels.\n"
+        "  faster-whisper-xxl drives a local standalone build: every language, "
+        "speakers included,\n"
+        "  GPU, and no HuggingFace token"
+        + (f" [green](found: {found_local})[/green]" if found_local
+           else " [yellow](not found on this machine)[/yellow]")
+        + ".[/dim]"
     )
-    new_config["defaults"]["whisper_model"] = model
+    backend = click.prompt(
+        "  Backend", type=click.Choice(list(BACKENDS)), default=default_backend,
+    )
+    target.set("defaults", "transcribe_backend", backend)
+
+    if backend == LOCAL_BACKEND and not found_local:
+        where = click.prompt(
+            "  Path to faster-whisper-xxl (leave blank to set it later)", default="",
+        )
+        if where:
+            target.set("defaults", "faster_whisper_path", where)
+            if not find_faster_whisper(where):
+                console.print("  [yellow]Nothing executable there yet. "
+                              "Device commands still work; transcription will not."
+                              "[/yellow]")
+
+    if backend == LOCAL_BACKEND:
+        default_model = (target.get("defaults", "whisper_model", "")
+                         or DEFAULT_LOCAL_MODEL)
+        if str(default_model).endswith(".en"):
+            # Carrying an English-only model over would transcribe Italian and
+            # German into phonetic nonsense.
+            default_model = DEFAULT_LOCAL_MODEL
+        model = click.prompt("  Model", default=default_model)
+    elif backend == DEFAULT_BACKEND:
+        model = click.prompt(
+            "  Whisper model",
+            type=click.Choice(["tiny.en", "base.en", "small.en", "medium.en", "large"]),
+            default=target.get("defaults", "whisper_model", "") or "base.en",
+        )
+    else:
+        model = target.get("defaults", "whisper_model", "") or "base.en"
+    target.set("defaults", "whisper_model", model)
+
+    console.print(
+        "\n  [bold]Language[/bold]\n"
+        "  [dim]'auto' detects it per recording. Set one explicitly if you always "
+        "speak the same\n  language: detection on a short recording is a coin flip, "
+        "and losing it produces\n  phonetic nonsense rather than an obvious error."
+        "[/dim]"
+    )
+    language = click.prompt(
+        "  Language (auto, or a code like it, de, en)",
+        default=target.get("defaults", "language", "") or "auto",
+    )
+    target.set("defaults", "language", language.strip().lower())
+
+    if target_profile:
+        label = click.prompt("  Label shown in the web interface",
+                             default=target.get("web", "label", "")
+                             or target_profile.replace("-", " ").replace("_", " ").title())
+        target.set("web", "label", label)
+        # One default is enough to answer "which profile?"; without it every
+        # command needs --profile, which is the right default for two people
+        # sharing a machine but surprising for one person with two recorders.
+        if len(list_profiles(new_config)) > 1 and not new_config.get("default_profile"):
+            if click.confirm(f"\n  Make '{target_profile}' the default profile?", default=False):
+                new_config["default_profile"] = target_profile
+        elif len(list_profiles(new_config)) == 1:
+            new_config["default_profile"] = target_profile
 
     # Save
     save_config(new_config)
     console.print(f"\n[green]Config saved to {CONFIG_FILE}[/green]")
+    for warning in profile_warnings(new_config):
+        console.print(f"[yellow]  {warning}[/yellow]")
+
+    saved = effective_config(new_config, target_profile or None)
+    saved_address = resolve_address(saved)
+    saved_key = resolve_session_key(saved)
 
     # Test connection
-    if new_config["device"].get("address") and new_config["device"].get("session_key"):
+    if saved_address and saved_key:
         if click.confirm("\n  Test connection to device?", default=True):
             try:
                 async def _test():
-                    sk = new_config["device"]["session_key"]
-                    async with PocketCommander(new_config["device"]["address"]) as cmd:
-                        ok = await cmd.authenticate(sk)
+                    async with PocketCommander(saved_address) as cmd:
+                        ok = await cmd.authenticate(saved_key)
                         if ok:
                             battery = await cmd.get_battery()
                             console.print(f"  [green]Connected! Battery: {battery}%[/green]")
@@ -196,24 +428,29 @@ def setup(ctx):
                 console.print(f"  [yellow]Connection failed: {e}[/yellow]")
                 console.print("  [dim]Make sure the device is awake (press button).[/dim]")
 
-    if not new_config["device"].get("session_key"):
+    if not saved_key:
+        key_path = (f"profiles.{target_profile}.session_key" if target_profile
+                    else "device.session_key")
         console.print(Panel(
             "[bold yellow]No session key configured.[/bold yellow]\n\n"
             "Device commands (status, list, download, sync, web) won't work\n"
             "until you set one. Capture it from the vendor app's APP&SK& write\n"
             "(see PROTOCOL.md), then run:\n"
-            "  pocket-libre config --set device.session_key=YOUR-KEY",
+            f"  pocket-libre config --set {key_path}=YOUR-KEY",
             border_style="yellow",
         ))
 
+    flag = f" --profile {target_profile}" if target_profile else ""
     console.print(Panel(
         "[bold green]Setup complete![/bold green]\n\n"
         "Get started:\n"
-        "  [bold]pocket-libre web[/bold]     Open the web interface (recommended)\n"
-        "  [bold]pocket-libre sync[/bold]    Download + transcribe + summarize all recordings\n\n"
+        f"  [bold]pocket-libre{flag} web[/bold]     Open the web interface (recommended)\n"
+        f"  [bold]pocket-libre{flag} sync[/bold]    Download + transcribe + summarize all recordings\n\n"
         "Other commands:\n"
-        "  [bold]pocket-libre status[/bold]  Check device battery & storage\n"
-        "  [bold]pocket-libre list[/bold]    List recordings on device",
+        f"  [bold]pocket-libre{flag} status[/bold]  Check device battery & storage\n"
+        f"  [bold]pocket-libre{flag} list[/bold]    List recordings on device"
+        + ("\n  [bold]pocket-libre profiles[/bold]        Show every configured recorder"
+           if target_profile else ""),
         border_style="green",
     ))
 
@@ -228,33 +465,525 @@ def show_config(ctx, show_path: bool, set_value: str | None):
         console.print(str(CONFIG_FILE))
         return
 
+    # Always the file as written: the profile-folded view would save one
+    # profile's values over the global sections and drop the others.
+    config = ctx.obj["raw_config"]
+
     if set_value:
         if "=" not in set_value or "." not in set_value.split("=")[0]:
-            raise click.UsageError("Format: --set section.key=value (e.g., device.address=ABC123)")
+            raise click.UsageError(
+                "Format: --set section.key=value (e.g., device.address=ABC123)\n"
+                "Profile settings take a third part: profiles.hers.address=ABC123"
+            )
         path, value = set_value.split("=", 1)
-        section, key = path.split(".", 1)
-        config = ctx.obj["config"]
-        if section not in config:
-            config[section] = {}
-        config[section][key] = value
+        parts = path.split(".")
+        if len(parts) == 2:
+            section, key = parts
+            config.setdefault(section, {})[key] = value
+        elif len(parts) == 3 and parts[0] == PROFILES_SECTION:
+            _, name, key = parts
+            if not VALID_PROFILE_NAME.match(name):
+                raise click.UsageError(
+                    f"{name!r} is not a usable profile name. Use lowercase letters, "
+                    "digits, '-' or '_', starting with a letter or digit."
+                )
+            config.setdefault(PROFILES_SECTION, {}).setdefault(name, {})[key] = value
+        else:
+            raise click.UsageError(
+                f"Don't know where to put {path!r}. Use section.key, "
+                "or profiles.<name>.key for a profile setting."
+            )
         save_config(config)
-        console.print(f"[green]Set {section}.{key}[/green]")
+        console.print(f"[green]Set {path}[/green]")
+        for warning in profile_warnings(config):
+            console.print(f"[yellow]  {warning}[/yellow]")
         return
 
-    config = ctx.obj["config"]
     if not config:
         console.print("[yellow]No config file found.[/yellow] Run: [bold]pocket-libre setup[/bold]")
         return
 
-    for section, values in config.items():
-        if not isinstance(values, dict):
-            continue
-        console.print(f"\n[bold cyan][{section}][/bold cyan]")
+    active = ctx.obj["profile"]
+    if active:
+        console.print(f"[dim]Active profile: [/dim][bold]{active}[/bold]")
+
+    def _print_table(values: dict, indent: str = "  "):
         for key, val in values.items():
+            if isinstance(val, dict):
+                continue
             display = val
             if key in ("anthropic_key", "hf_token", "session_key") and val and len(str(val)) > 8:
                 display = f"...{str(val)[-4:]}"
-            console.print(f"  {key} = {display}")
+            console.print(f"{indent}{key} = {display}")
+
+    for key, val in config.items():
+        if not isinstance(val, dict):
+            console.print(f"[bold cyan]{key}[/bold cyan] = {val}")
+
+    for section, values in config.items():
+        if not isinstance(values, dict):
+            continue
+        if section == PROFILES_SECTION:
+            for name, table in values.items():
+                marker = "  [green](active)[/green]" if name == active else ""
+                header = escape(f"[profiles.{name}]")
+                console.print(f"\n[bold cyan]{header}[/bold cyan]{marker}")
+                if isinstance(table, dict):
+                    _print_table(table)
+            continue
+        console.print(f"\n[bold cyan]{escape(f'[{section}]')}[/bold cyan]")
+        _print_table(values)
+
+
+@cli.command("profiles")
+@click.pass_context
+def list_profiles_cmd(ctx):
+    """List configured recorders, their libraries, and their web ports."""
+    config = ctx.obj["raw_config"]
+    profiles = list_profiles(config)
+
+    if not profiles:
+        console.print(
+            "[yellow]No profiles configured.[/yellow] This config describes a single "
+            "device.\n[dim]Add one per recorder with: "
+            "pocket-libre setup --profile <name>[/dim]"
+        )
+        return
+
+    from rich.table import Table
+
+    active = ctx.obj["profile"]
+    default = config.get("default_profile")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("")
+    table.add_column("Profile")
+    table.add_column("Label")
+    table.add_column("Device")
+    table.add_column("Key")
+    table.add_column("Port")
+    table.add_column("Library")
+
+    for name in sorted(profiles):
+        marks = []
+        if name == active:
+            marks.append("[green]*[/green]")
+        if name == default:
+            marks.append("[dim]d[/dim]")
+        key = resolve_session_key(config, profile=name)
+        own_key = bool(profiles[name].get("session_key"))
+        table.add_row(
+            " ".join(marks),
+            f"[bold]{name}[/bold]",
+            profile_label(config, name),
+            str(profiles[name].get("address") or "[yellow]not set[/yellow]"),
+            ("own" if own_key else "shared") if key else "[yellow]missing[/yellow]",
+            str(resolve_web_port(config, profile=name)),
+            get_output_dir(config, profile=name),
+        )
+
+    console.print(table)
+    console.print("[dim]* active   d default   "
+                  f"Key 'shared' means it falls back to {escape('[device]')}"
+                  ".session_key[/dim]")
+    for warning in profile_warnings(config):
+        console.print(f"[yellow]  {warning}[/yellow]")
+
+
+@cli.group("speakers", invoke_without_command=True)
+@click.pass_context
+def speakers_group(ctx):
+    """Put names to voices in this library.
+
+    \b
+    Diarization labels are per recording: SPEAKER_01 in one file is not the
+    same person as SPEAKER_01 in the next. A name comes from a voice enrolled
+    once, then matched by its embedding in every later recording.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(speakers_list)
+
+
+def _voice_library(ctx):
+    from pocket_libre.speakers import VoiceLibrary
+
+    _require_resolved_profile(ctx)
+    library_dir = Path(get_output_dir(ctx.obj["config"]))
+    return library_dir, VoiceLibrary.load(library_dir)
+
+
+def _recording_voices(library_dir: Path, recording: str) -> tuple[Path, dict]:
+    """Find a recording's stored embeddings from a `DATE/TIMESTAMP` reference."""
+    from pocket_libre.speakers import load_recording_voices
+
+    reference = recording.strip().replace("\\", "/")
+    if "/" not in reference:
+        raise click.UsageError(
+            "Give the recording as DATE/TIMESTAMP, for example "
+            f"2026-10-04/20261004153000 (got {recording!r})."
+        )
+    date_part, stamp = reference.rsplit("/", 1)
+    path = library_dir / date_part / f"{stamp}_voices.json"
+    voices = load_recording_voices(path)
+    if not voices:
+        raise click.UsageError(
+            f"No speaker embeddings stored for {reference}.\n"
+            "They are written when a recording is processed by the "
+            "faster-whisper-xxl backend with diarization on."
+        )
+    return path, voices
+
+
+@speakers_group.command("list")
+@click.pass_context
+def speakers_list(ctx):
+    """Show the voices enrolled in this library."""
+    library_dir, library = _voice_library(ctx)
+    console.print(f"[dim]Library: {library_dir}[/dim]")
+    if not library.voices:
+        console.print(
+            "[yellow]No voices enrolled.[/yellow]\n"
+            "[dim]Enroll one from a recording you can identify by ear:\n"
+            "  pocket-libre speakers enroll <name> "
+            "--recording DATE/TIMESTAMP --label SPEAKER_01[/dim]"
+        )
+        return
+    for name in library.names:
+        samples = len(library.voices[name])
+        console.print(f"  [bold]{name}[/bold]  {samples} sample(s)")
+    console.print(f"[dim]Match threshold: {library.threshold:.2f}[/dim]")
+
+
+@speakers_group.command("enroll")
+@click.argument("name")
+@click.option("--recording", required=True, metavar="DATE/TIMESTAMP",
+              help="Recording to take the voice from.")
+@click.option("--label", required=True,
+              help="Which diarized speaker in that recording (e.g. SPEAKER_01).")
+@click.pass_context
+def speakers_enroll(ctx, name: str, recording: str, label: str):
+    """Teach this library a voice, from one speaker in one recording."""
+    library_dir, library = _voice_library(ctx)
+    _path, voices = _recording_voices(library_dir, recording)
+
+    if label not in voices:
+        raise click.UsageError(
+            f"{recording} has no speaker {label!r}. It has: "
+            + ", ".join(sorted(voices))
+        )
+
+    library.enroll(name, voices[label])
+    library.save()
+    console.print(
+        f"[green]Enrolled {name} from {recording} ({label}).[/green] "
+        f"{len(library.voices[name])} sample(s) on file."
+    )
+    console.print("[dim]Add a sample from another recording to make the match "
+                  "hold up across rooms and microphones.[/dim]")
+
+
+@speakers_group.command("forget")
+@click.argument("name")
+@click.pass_context
+def speakers_forget(ctx, name: str):
+    """Remove an enrolled voice."""
+    _library_dir, library = _voice_library(ctx)
+    if not library.forget(name):
+        raise click.UsageError(
+            f"No voice named {name!r}. Enrolled: "
+            + (", ".join(library.names) or "none")
+        )
+    library.save()
+    console.print(f"[green]Forgot {name}.[/green]")
+
+
+@speakers_group.command("test")
+@click.option("--recording", required=True, metavar="DATE/TIMESTAMP",
+              help="Recording to score against the enrolled voices.")
+@click.option("--threshold", default=None, type=float,
+              help="Try a different match threshold, for this run only.")
+@click.pass_context
+def speakers_test(ctx, recording: str, threshold: float | None):
+    """Score one recording's speakers against every enrolled voice.
+
+    \b
+    Pick a threshold from real numbers rather than trusting the default: the
+    right cut-off depends on the microphone and on the voices.
+    """
+    from rich.table import Table
+
+    from pocket_libre.speakers import identify
+
+    library_dir, library = _voice_library(ctx)
+    _path, voices = _recording_voices(library_dir, recording)
+
+    if not library.voices:
+        console.print("[yellow]No voices enrolled yet, so there is nothing to "
+                      "score against.[/yellow]")
+        console.print("Speakers in this recording: " + ", ".join(sorted(voices)))
+        return
+
+    limit = library.threshold if threshold is None else threshold
+    matched = identify(voices, library, threshold=limit)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Speaker")
+    for name in library.names:
+        table.add_column(name, justify="right")
+    table.add_column("Match")
+
+    for label in sorted(voices):
+        scores = dict(library.score(voices[label]))
+        row = [label] + [f"{scores.get(name, 0.0):.3f}" for name in library.names]
+        row.append(matched.get(label) or "[dim]unnamed[/dim]")
+        table.add_row(*row)
+
+    console.print(table)
+    console.print(f"[dim]Threshold {limit:.2f}. Below it a speaker stays unnamed, "
+                  "which is the right answer when it is someone else.[/dim]")
+
+
+@speakers_group.command("threshold")
+@click.argument("value", type=float)
+@click.pass_context
+def speakers_threshold(ctx, value: float):
+    """Set the match threshold for this library."""
+    if not 0.0 < value < 1.0:
+        raise click.UsageError("A cosine similarity threshold lies between 0 and 1.")
+    _library_dir, library = _voice_library(ctx)
+    library.threshold = value
+    library.save()
+    console.print(f"[green]Match threshold set to {value:.2f}.[/green]")
+
+
+@cli.command("search")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--limit", default=20, type=int, help="How many results to show.")
+@click.option("--kind", "kinds", multiple=True,
+              type=click.Choice(["transcript", "summary", "actions"]),
+              help="Restrict to one kind of document. Repeatable.")
+@click.option("--reindex", is_flag=True, help="Rebuild the index from scratch first.")
+@click.pass_context
+def search_library(ctx, query: tuple, limit: int, kinds: tuple, reindex: bool):
+    """Search this library's transcripts and summaries.
+
+    \b
+    The index lives inside the library and is refreshed before each search,
+    so it is never stale and never reaches another profile's recordings.
+    """
+    from pocket_libre.index import MATCH_CLOSE, MATCH_OPEN, build, search
+
+    _require_resolved_profile(ctx)
+    library = Path(get_output_dir(ctx.obj["config"]))
+    if not library.is_dir():
+        raise click.UsageError(f"No library at {library} yet. Sync something first.")
+
+    if reindex:
+        stats = build(library, rebuild=True)
+        console.print(f"[dim]Indexed {stats['added']} document(s).[/dim]")
+
+    phrase = " ".join(query)
+    hits = search(library, phrase, limit=limit, kinds=kinds or None)
+
+    if not hits:
+        console.print(f"[yellow]Nothing matched {phrase!r}.[/yellow]")
+        return
+
+    console.print(f"[dim]{len(hits)} result(s) in {library}[/dim]\n")
+    for hit in hits:
+        console.print(f"[bold]{hit.reference}[/bold]  [dim]{hit.kind}[/dim]")
+        # Escape first, then turn the match markers into styling, so nothing in
+        # a transcript can inject console markup.
+        marked = (escape(hit.snippet)
+                  .replace(MATCH_OPEN, "[bold yellow]")
+                  .replace(MATCH_CLOSE, "[/bold yellow]"))
+        console.print(f"  {marked}\n")
+
+
+@cli.command("reindex")
+@click.pass_context
+def reindex_library(ctx):
+    """Rebuild this library's search index from the files on disk."""
+    from pocket_libre.index import build, index_path
+
+    _require_resolved_profile(ctx)
+    library = Path(get_output_dir(ctx.obj["config"]))
+    stats = build(library, rebuild=True)
+    console.print(
+        f"[green]Indexed {stats['added']} document(s)[/green] "
+        f"[dim]-> {index_path(library)}[/dim]"
+    )
+
+
+@cli.command("export")
+@click.option("--recording", default=None, metavar="DATE/TIMESTAMP",
+              help="Export one recording. Omit to export everything not yet written.")
+@click.option("--to", "destination", default=None,
+              help="Where to write the notes. Defaults to the profile's export path.")
+@click.option("--overwrite", is_flag=True,
+              help="Replace notes that already exist, losing any hand edits.")
+@click.option("--dry-run", is_flag=True, help="Show what would be written.")
+@click.pass_context
+def export_notes(ctx, recording: str | None, destination: str | None,
+                 overwrite: bool, dry_run: bool):
+    """Write processed recordings out as Markdown notes.
+
+    \b
+    One self-contained note per recording: summary, action items as checkboxes,
+    and the full transcript. Off unless this profile sets an export path, so
+    nobody's recordings land in someone else's notes by default.
+    """
+    from pocket_libre.analyze import load_analyses
+    from pocket_libre.export import action_items_from_entities, export_note
+
+    _require_resolved_profile(ctx)
+    config = ctx.obj["config"]
+    profile = ctx.obj["profile"]
+    library = Path(get_output_dir(config))
+
+    enabled = get(config, "export", "vault", default=False)
+    target = destination or get(config, "export", "vault_path", default="")
+    if not target:
+        raise click.UsageError(
+            "No export path for this profile. Set one with:\n"
+            f"  pocket-libre config --set profiles.{profile or '<name>'}"
+            ".vault_path=<folder>\n"
+            f"  pocket-libre config --set profiles.{profile or '<name>'}"
+            ".vault_export=true\n"
+            "or pass --to <folder> for a one-off."
+        )
+    if not enabled and not destination:
+        raise click.UsageError(
+            f"Export is off for this profile. Turn it on with:\n"
+            f"  pocket-libre config --set profiles.{profile or '<name>'}"
+            ".vault_export=true\n"
+            "or pass --to <folder> for a one-off."
+        )
+
+    out = Path(os.path.expanduser(str(target)))
+
+    if not library.is_dir():
+        raise click.UsageError(f"No library at {library} yet. Sync something first.")
+
+    wanted = []
+    if recording:
+        reference = recording.strip().replace("\\", "/")
+        if "/" not in reference:
+            raise click.UsageError("Give the recording as DATE/TIMESTAMP.")
+        day, stamp = reference.rsplit("/", 1)
+        wanted.append((day, stamp))
+    else:
+        for date_dir in sorted(p for p in library.iterdir() if p.is_dir()):
+            for transcript in sorted(date_dir.glob("*_transcript.txt")):
+                wanted.append((date_dir.name, transcript.name[: -len("_transcript.txt")]))
+
+    if not wanted:
+        console.print("[yellow]Nothing processed to export yet.[/yellow]")
+        return
+
+    written, skipped = 0, 0
+    for day, stamp in wanted:
+        rec_dir = library / day
+        transcript_path = rec_dir / f"{stamp}_transcript.txt"
+        if not transcript_path.is_file():
+            console.print(f"[yellow]{day}/{stamp}: no transcript, skipped.[/yellow]")
+            skipped += 1
+            continue
+
+        summary_path = rec_dir / f"{stamp}_summary.md"
+        summary = (summary_path.read_text(encoding="utf-8")
+                   if summary_path.is_file() else None)
+        analyses = load_analyses(rec_dir, stamp)
+        actions = action_items_from_entities(analyses.get("entities"))
+
+        transcript = transcript_path.read_text(encoding="utf-8")
+
+        if dry_run:
+            console.print(
+                f"  {day}/{stamp} -> {out}  "
+                f"[dim]{len(actions)} action item(s)[/dim]"
+            )
+            continue
+
+        try:
+            path = export_note(
+                out,
+                recording=f"{day}/{stamp}",
+                recorded_on=day,
+                transcript=transcript,
+                summary=summary,
+                actions=actions,
+                profile=profile,
+                overwrite=overwrite,
+            )
+        except FileExistsError as e:
+            console.print(f"[dim]{day}/{stamp}: already exported ({Path(str(e)).name}).[/dim]")
+            skipped += 1
+            continue
+
+        written += 1
+        console.print(f"[green]{day}/{stamp}[/green] -> {path}")
+
+    if dry_run:
+        console.print(f"\n[dim]{len(wanted)} recording(s) would be written to {out}.[/dim]")
+        return
+
+    console.print(
+        f"\n[bold green]{written} note(s) written.[/bold green]"
+        + (f" [dim]{skipped} skipped.[/dim]" if skipped else "")
+        + ("\n[dim]Use --overwrite to replace existing notes.[/dim]" if skipped else "")
+    )
+
+
+@cli.command("tasks")
+@click.option("--recording", default=None, metavar="DATE/TIMESTAMP",
+              help="One recording. Omit for every processed recording.")
+@click.pass_context
+def list_tasks(ctx, recording: str | None):
+    """Print the commitments found in processed recordings, as checkboxes.
+
+    \b
+    Ready to paste into a task list. Nothing is ever added anywhere
+    automatically, and a task only carries a date if the transcript said one.
+    """
+    from pocket_libre.analyze import load_analyses
+    from pocket_libre.export import action_items_from_entities
+
+    _require_resolved_profile(ctx)
+    library = Path(get_output_dir(ctx.obj["config"]))
+    if not library.is_dir():
+        raise click.UsageError(f"No library at {library} yet.")
+
+    references = []
+    if recording:
+        reference = recording.strip().replace("\\", "/")
+        if "/" not in reference:
+            raise click.UsageError("Give the recording as DATE/TIMESTAMP.")
+        references.append(tuple(reference.rsplit("/", 1)))
+    else:
+        for date_dir in sorted(p for p in library.iterdir() if p.is_dir()):
+            for found in sorted(date_dir.glob("*_entities.json")):
+                references.append((date_dir.name, found.name[: -len("_entities.json")]))
+
+    marker = _due_marker()
+    total = 0
+    for day, stamp in references:
+        items = action_items_from_entities(
+            load_analyses(library / day, stamp).get("entities")
+        )
+        if not items:
+            continue
+        console.print(f"\n[dim]{day}/{stamp}[/dim]")
+        for item in items:
+            console.print(escape(item.as_checkbox(due_marker=marker)))
+        total += len(items)
+
+    if not total:
+        console.print(
+            "[yellow]No action items found.[/yellow]\n"
+            "[dim]They come from the 'entities' analysis, which needs an "
+            "Anthropic key. Check: pocket-libre config[/dim]"
+        )
 
 
 # ── Device Commands ─────────────────────────────
@@ -728,33 +1457,31 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             if skip_process:
                 continue
 
-            # Transcribe
-            console.print(f"  [dim]Transcribing ({whisper_model})...[/dim]")
+            # Transcribe and attach speakers
+            options = options_from_config(config, whisper_model)
+            console.print(
+                f"  [dim]Transcribing ({options['backend']}, {options['model']})...[/dim]"
+            )
             try:
-                import whisper
-                model = whisper.load_model(whisper_model)
-                result = model.transcribe(str(audio_path), verbose=False)
-                segments = result.get("segments", [])
+                labeled, transcription = transcribe_and_label(
+                    audio_path, hf_token=hf_token, anthropic_key=anthropic_key,
+                    library_dir=out_root,
+                    voices_path=rec_dir / f"{rec.timestamp}_voices.json",
+                    **options,
+                )
             except Exception as e:
                 console.print(f"  [red]Transcription failed: {e}[/red]")
                 continue
-
-            # Diarize
-            try:
-                from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
-                speaker_segments = diarize_auto(
-                    segments, audio_path=str(audio_path),
-                    hf_token=hf_token, anthropic_key=anthropic_key,
-                )
-                labeled = merge_transcript_with_speakers(segments, speaker_segments)
-            except Exception:
-                labeled = [{"start": s["start"], "end": s["end"], "speaker": "Speaker", "text": s["text"]} for s in segments]
 
             from pocket_libre.summarize import format_transcript_for_summary
             transcript_text = format_transcript_for_summary(labeled)
             transcript_path = rec_dir / f"{rec.timestamp}_transcript.txt"
             transcript_path.write_text(transcript_text, encoding="utf-8")
-            console.print(f"  [green]Transcript saved ({len(segments)} segments)[/green]")
+            detected = f", {transcription.language}" if transcription.language else ""
+            console.print(
+                f"  [green]Transcript saved ({len(labeled)} segments"
+                f"{detected})[/green]"
+            )
 
             # Summarize
             if anthropic_key:
@@ -821,34 +1548,32 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = input_file.stem
 
+    options = options_from_config(config, whisper_model)
     console.print(Panel(
         f"[bold]Processing: {input_path}[/bold]\n"
-        f"Whisper: {whisper_model} | Style: {style}",
+        f"Backend: {options['backend']} | Model: {options['model']} | "
+        f"Language: {options['language']} | Style: {style}",
         border_style="cyan",
     ))
 
-    # Transcribe
-    console.print("\n[bold cyan]Step 1/3: Transcribing...[/bold cyan]\n")
+    # Transcribe, then attach speakers
+    console.print("\n[bold cyan]Step 1/2: Transcribing and identifying speakers..."
+                  "[/bold cyan]\n")
     try:
-        import whisper
-    except ImportError:
-        console.print("[red]Whisper not installed.[/red]")
+        labeled, transcription = transcribe_and_label(
+            input_file, hf_token=hf_token, anthropic_key=anthropic_key,
+            library_dir=get_output_dir(config),
+            voices_path=out_dir / f"{stem}_voices.json",
+            **options,
+        )
+    except TranscriptionError as e:
+        console.print(f"[red]{e}[/red]")
         return
 
-    model = whisper.load_model(whisper_model)
-    result = model.transcribe(str(input_file), verbose=False)
-    segments = result.get("segments", [])
-    console.print(f"[green]Transcribed: {len(segments)} segments[/green]")
-
-    # Diarize
-    console.print("\n[bold cyan]Step 2/3: Identifying speakers...[/bold cyan]\n")
-    from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
-
-    speaker_segments = diarize_auto(
-        segments, audio_path=str(input_file),
-        hf_token=hf_token, anthropic_key=anthropic_key,
-    )
-    labeled = merge_transcript_with_speakers(segments, speaker_segments)
+    detected = f", language {transcription.language}" if transcription.language else ""
+    console.print(f"[green]Transcribed: {len(labeled)} segments{detected}[/green]")
+    if transcription.speakers:
+        console.print(f"[green]Speakers: {', '.join(transcription.speakers)}[/green]")
 
     from pocket_libre.summarize import format_transcript_for_summary
     transcript_text = format_transcript_for_summary(labeled)
@@ -861,7 +1586,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
     if skip_summary:
         console.print("\n[dim]Skipping summary.[/dim]")
     else:
-        console.print("\n[bold cyan]Step 3/3: Summarizing...[/bold cyan]\n")
+        console.print("\n[bold cyan]Step 2/2: Summarizing...[/bold cyan]\n")
         if not anthropic_key:
             console.print(Panel(
                 "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
@@ -908,18 +1633,34 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
 @click.option("--output-dir", default=None, help="Where to save recordings.")
 @click.option("--process", "do_process", is_flag=True,
               help="Also transcribe and summarize each new recording.")
+@click.option("--all", "all_profiles", is_flag=True,
+              help="Watch every configured profile, one device at a time.")
 @click.pass_context
 def watch(ctx, address: str | None, session_key: str | None, interval: float,
-          output_dir: str | None, do_process: bool):
+          output_dir: str | None, do_process: bool, all_profiles: bool):
     """Watch for the device and sync new recordings automatically.
 
     \b
     Runs until interrupted. Scans for your Pocket every --interval seconds;
     when it appears, downloads anything not already on disk. Backs off to
     5-minute checks while the device is away.
+
+    \b
+    With --all, every profile is watched in turn and each recording lands in
+    its own profile's library.
     """
     from pocket_libre.watch import sync_new_recordings, watch_loop
 
+    if all_profiles:
+        if address or session_key or output_dir:
+            raise click.UsageError(
+                "--all watches every profile, so --address, --key and "
+                "--output-dir cannot apply. Drop them, or watch one profile."
+            )
+        _watch_all_profiles(ctx, interval, do_process)
+        return
+
+    _require_resolved_profile(ctx)
     config = ctx.obj["config"]
     address = _require_address(address, config)
     session_key = _require_session_key(session_key, config)
@@ -943,6 +1684,7 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
             address=address, session_key=session_key, out_root=out_root,
             process=do_process, whisper_model=whisper_model, summary_style=style,
             anthropic_key=anthropic_key, hf_token=hf_token,
+            backend_options=options_from_config(config, whisper_model),
         )
 
     try:
@@ -954,6 +1696,84 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
     console.print(
         f"[dim]{stats.scans} scans, {stats.recordings_synced} recordings synced.[/dim]"
     )
+
+
+def _watch_all_profiles(ctx, interval: float, do_process: bool) -> None:
+    """Watch every configured profile, sequentially, each into its own library."""
+    from pocket_libre.watch import WatchTarget, sync_new_recordings, watch_many
+
+    raw = ctx.obj["raw_config"]
+    profiles = list_profiles(raw)
+    if not profiles:
+        raise click.UsageError(
+            "--all needs profiles. This config describes a single device, so "
+            "plain 'pocket-libre watch' is what you want.\n"
+            "Add a profile per recorder with: pocket-libre setup --profile <name>"
+        )
+
+    targets = []
+    skipped = []
+    for name in sorted(profiles):
+        # One folded config per profile: each closure below can only ever see
+        # its own device, library and credentials.
+        scoped = effective_config(raw, name)
+        addr = resolve_address(scoped)
+        key = resolve_session_key(scoped)
+        if not addr or not key:
+            missing = "address" if not addr else "session key"
+            skipped.append(f"{name} (no {missing})")
+            continue
+
+        out_root = Path(get_output_dir(scoped))
+        targets.append(WatchTarget(
+            name=name,
+            address=addr,
+            sync_once=functools.partial(
+                sync_new_recordings,
+                address=addr,
+                session_key=key,
+                out_root=out_root,
+                process=do_process,
+                whisper_model=get(scoped, "defaults", "whisper_model", default="base.en"),
+                summary_style=get(scoped, "defaults", "summary_style", default="meeting"),
+                anthropic_key=resolve_anthropic_key(scoped),
+                hf_token=resolve_hf_token(scoped),
+                backend_options=options_from_config(scoped),
+            ),
+        ))
+
+    if not targets:
+        raise click.UsageError(
+            "No profile is ready to watch: " + ", ".join(skipped) + ".\n"
+            "Finish one with: pocket-libre setup --profile <name>"
+        )
+
+    lines = "\n".join(
+        f"  {t.name:<12} {t.address}  ->  {get_output_dir(effective_config(raw, t.name))}"
+        for t in targets
+    )
+    console.print(Panel(
+        f"[bold]Watching {len(targets)} profile(s), one device at a time[/bold]\n\n"
+        f"{lines}\n\n"
+        f"Interval:   {interval:.0f}s per profile\n"
+        f"Processing: {'on' if do_process else 'off'}\n"
+        + (f"Skipped:    {', '.join(skipped)}\n" if skipped else "")
+        + "\nPress Ctrl+C to stop.",
+        border_style="cyan",
+    ))
+
+    try:
+        stats = asyncio.run(watch_many(targets, poll_interval=interval))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped.[/yellow]")
+        return
+
+    for name in sorted(stats):
+        s = stats[name]
+        console.print(
+            f"[dim]{name}: {s.scans} scans, {s.recordings_synced} recordings synced, "
+            f"{s.failures} failure(s).[/dim]"
+        )
 
 
 # ── WiFi Transfer ───────────────────────────────
@@ -1213,24 +2033,49 @@ def wifi_transfer(ctx, address: str | None, session_key: str | None, date: str |
 
 
 @cli.command()
-@click.option("--port", default=8265, help="Port to serve on.")
+@click.option("--port", default=None, type=int,
+              help="Port to serve on. Defaults to the profile's own port.")
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
 @click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
-def web(host: str, port: int, no_browser: bool):
+@click.option("--all", "all_profiles", is_flag=True,
+              help="Serve every profile, each on its own port, in its own process.")
+@click.pass_context
+def web(ctx, host: str, port: int | None, no_browser: bool, all_profiles: bool):
     """Launch the Pocket Libre web interface.
 
     Opens a browser-based UI for managing recordings, transcripts,
     and summaries. No terminal required after launch.
+
+    \b
+    With --all, one server is started per profile, each bound to that
+    profile's library and reachable on that profile's port.
     """
     import webbrowser
 
     import uvicorn
 
+    if all_profiles:
+        if port is not None:
+            raise click.UsageError(
+                "--all gives every profile its own port, so --port cannot apply. "
+                "Set a profile's port with: "
+                "pocket-libre config --set profiles.<name>.web_port=<port>"
+            )
+        _serve_all_profiles(ctx, host, no_browser)
+        return
+
+    _require_resolved_profile(ctx)
+    profile = ctx.obj["profile"]
+    config = ctx.obj["config"]
+    port = resolve_web_port(config, port)
+
     # 0.0.0.0 is not a connectable address — point the browser at loopback.
     browse_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
+    whose = f"\nProfile:   {profile_label(config, profile)} ({profile})" if profile else ""
     console.print(Panel(
-        f"[bold]Pocket Libre Web UI[/bold]\n\n"
+        f"[bold]Pocket Libre Web UI[/bold]{whose}\n"
+        f"Library:   {get_output_dir(config)}\n\n"
         f"Starting at http://{browse_host}:{port}\n"
         f"Press Ctrl+C to stop.",
         border_style="cyan",
@@ -1251,7 +2096,94 @@ def web(host: str, port: int, no_browser: bool):
         import threading
         threading.Timer(1.0, lambda: webbrowser.open(f"http://{browse_host}:{port}")).start()
 
-    uvicorn.run("pocket_libre.web.app:app", host=host, port=port, log_level="warning")
+    # Bind the app to this profile before serving, and hand uvicorn the object
+    # rather than an import string so the setting cannot be lost to a reimport.
+    from pocket_libre.web import app as web_app
+
+    web_app.set_active_profile(profile)
+    uvicorn.run(web_app.app, host=host, port=port, log_level="warning")
+
+
+def _serve_all_profiles(ctx, host: str, no_browser: bool) -> None:
+    """Start one web server per profile, each in its own process.
+
+    Separate processes, not threads: the app binds its profile in module-level
+    state, so two servers sharing an interpreter would serve each other's
+    libraries. A process per profile makes that impossible.
+    """
+    import subprocess
+    import sys
+    import time
+    import webbrowser
+
+    raw = ctx.obj["raw_config"]
+    profiles = list_profiles(raw)
+    if not profiles:
+        raise click.UsageError(
+            "--all needs profiles. This config describes a single device, so "
+            "plain 'pocket-libre web' is what you want.\n"
+            "Add a profile per recorder with: pocket-libre setup --profile <name>"
+        )
+
+    ports = {name: resolve_web_port(raw, profile=name) for name in sorted(profiles)}
+    clashes = [p for p in set(ports.values()) if list(ports.values()).count(p) > 1]
+    if clashes:
+        raise click.UsageError(
+            f"Two profiles want the same port ({', '.join(map(str, sorted(clashes)))}). "
+            "Give each one its own: "
+            "pocket-libre config --set profiles.<name>.web_port=<port>"
+        )
+
+    browse_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    lines = "\n".join(
+        f"  {profile_label(raw, name):<14} http://{browse_host}:{ports[name]}"
+        f"  ->  {get_output_dir(raw, profile=name)}"
+        for name in sorted(profiles)
+    )
+    console.print(Panel(
+        f"[bold]Pocket Libre Web UI, one server per profile[/bold]\n\n{lines}\n\n"
+        "Press Ctrl+C to stop all of them.",
+        border_style="cyan",
+    ))
+
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(Panel(
+            "[bold yellow]This binds a non-loopback address.[/bold yellow]\n\n"
+            "The web interface has no authentication. Anyone who can reach\n"
+            "these ports can read both libraries, control both devices,\n"
+            "and spend your API credits.\n\n"
+            "Only do this on a network you trust.",
+            title="Warning",
+            border_style="yellow",
+        ))
+
+    children = []
+    try:
+        for name in sorted(profiles):
+            children.append(subprocess.Popen([
+                sys.executable, "-m", "pocket_libre.cli",
+                "--profile", name, "web",
+                "--host", host, "--port", str(ports[name]), "--no-browser",
+            ]))
+
+        if not no_browser:
+            time.sleep(1.5)
+            for name in sorted(profiles):
+                webbrowser.open(f"http://{browse_host}:{ports[name]}")
+
+        for child in children:
+            child.wait()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping.[/yellow]")
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+        for child in children:
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
 
 
 if __name__ == "__main__":

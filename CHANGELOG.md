@@ -13,6 +13,65 @@ confirmed it on 1.7.
 
 ### Added
 
+- **Profiles: one config, several recorders.** `[profiles.<name>]` tables give
+  each recorder its own device address, library, web port, credentials and
+  transcription settings. `--profile/-p` (or `POCKET_LIBRE_PROFILE`, or
+  `default_profile`) picks one; `pocket-libre profiles` lists them with their
+  libraries, ports and whether each has its own session key or inherits the
+  shared one. A config with no profiles behaves exactly as before.
+
+  The active profile is folded into the config once, at the entry point, so no
+  code further down can reach another profile's device or recordings. A profile
+  that does not name its own `output_directory` gets a subdirectory rather than
+  sharing the root, and `pocket-libre profiles` warns when two profiles would
+  share a library, a port or a device.
+
+- **`watch --all` and `web --all`.** `watch --all` polls every profile in turn,
+  one device at a time, each into its own library, with per-profile backoff so
+  an absent recorder does not slow down the one on the desk. `web --all` starts
+  one server per profile, each in its own process, on its own port. The web
+  header shows whose library it is, in that profile's own accent colour.
+
+- **Pluggable transcription, and a local multilingual backend.**
+  `defaults.transcribe_backend` chooses between `openai-whisper` (the default,
+  unchanged), `faster-whisper-xxl` (a local standalone build) and `none`.
+  The standalone backend transcribes in any of Whisper's languages, labels
+  speakers with a bundled pyannote, and runs on the GPU, with no torch in the
+  environment and no HuggingFace token. `defaults.language` takes `auto` or a
+  code; on `auto` the backend is asked to sample several windows, because
+  detection from the first window alone is a coin flip on a short recording and
+  produces phonetic nonsense rather than an obvious error when it loses.
+
+  Transcription and speaker attribution now happen in one place
+  (`backends.transcribe_and_label`) instead of six copies, so every entry point
+  - `sync`, `watch`, `process`, the web UI - behaves the same.
+
+- **Named speakers, matched by voice.** `pocket-libre speakers enroll <name>`
+  teaches a library a voice from one speaker in one recording; every later
+  recording is matched against it by cosine similarity of the speaker
+  embedding. `speakers test` prints the real similarity scores so the threshold
+  can be calibrated rather than guessed, and `speakers threshold` sets it.
+  Matching is one name per speaker and one speaker per name, and anything below
+  the threshold stays `SPEAKER_01` - which is the right answer when it is
+  someone else. Diarization labels are per recording, so a name map keyed on
+  them would have been worse than no names at all.
+
+- **Full-text search.** `pocket-libre search <words>` and a search box in the
+  web UI search inside transcripts, summaries and action items, via an FTS5
+  index stored in the library itself. Accent-folded, so a search for `perche`
+  finds `perché`. The index is incremental and refreshed before each search,
+  and `pocket-libre reindex` rebuilds it.
+
+- **Action items as checkboxes.** `pocket-libre tasks` prints the commitments
+  the `entities` analysis already extracts as `- [ ]` lines. A task carries a
+  due date only when the transcript stated an actual date; "next Tuesday" is
+  quoted as said rather than converted into a deadline nobody agreed to.
+
+- **Markdown export.** `pocket-libre export` writes one self-contained note per
+  recording - frontmatter, summary, action items, full transcript - into the
+  folder a profile names in `vault_path`. Off unless that profile sets
+  `vault_export`, and it refuses to overwrite a note that already exists
+  without `--overwrite`, since it may have been edited by hand.
 - **`wifi-transfer` downloads recordings over WiFi at about 1 MB/s** on
   firmware 1.7 and 1.8 (WiFi firmware V9). It raises the device's access
   point, joins it, requests each recording as a BLE transfer and switches it to
@@ -64,6 +123,12 @@ confirmed it on 1.7.
   download, not the WiFi verb; `APP&WIFI&SWITCH` isn't implemented on 1.8; and
   staging a file before `APP&WIFIO` isn't required.
 
+- **`fastapi[standard]` is now plain `fastapi` plus `uvicorn`.** The `standard`
+  extra pulls in `fastapi-cloud-cli`, and with it a Sentry client and
+  OpenTelemetry exporters. Nothing here used them, and a crash reporter inside
+  a tool whose promise is that your audio never leaves your machine is an own
+  goal.
+
 ### Removed
 
 - The HTTP escape hatch: `wifi-transfer --url`, the `wifi.url_template`
@@ -93,6 +158,29 @@ confirmed it on 1.7.
   failed** and retried, instead of being kept. Previously `sync` and
   `watch` only rejected transfers under half the size estimated from
   duration, and `download` checked nothing.
+
+- **The config was readable by every account on the machine, on Windows.**
+  `chmod(0o600)` is a no-op there: the file kept whatever ACL it inherited,
+  while `stat().st_mode` reported `0o666` regardless, so the test that was
+  meant to catch this could not. The ACL is now rewritten with `icacls`, and
+  the test asserts on the ACL on Windows and on the mode bits elsewhere. The
+  file holds the Anthropic key and the session key, which is also the device's
+  WiFi password.
+
+- **`pocket-libre config` never printed its section names.** `[device]` and
+  friends were being parsed as Rich style tags and dropped, leaving an
+  unlabelled list of values.
+
+- **The library search box could not find anything that was said.** It filtered
+  the text already rendered on screen, so it matched dates and filenames but
+  never the contents of a recording.
+
+- **`tasks` crashed on a Windows console in a legacy code page**, while
+  printing the calendar emoji in a due date. Files are still written UTF-8;
+  only the console falls back to a plainer marker.
+- **`export` listed a library without checking it existed**, so a profile with
+  nothing synced yet got a `FileNotFoundError` traceback instead of being told
+  to sync something first. `search` and `tasks` already checked.
 
 ## [1.1.0] — 2026-09-19
 
