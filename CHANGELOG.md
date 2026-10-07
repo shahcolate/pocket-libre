@@ -60,7 +60,9 @@ confirmed it on 1.7.
   only if its size matches, to the byte, the size its download recorded in
   `<date>/.downloads.json`, and the device still lists the recording with the
   duration it had then, so a recording that grew after it was downloaded, or a
-  name reused for a new recording, is kept. `download-all`, `sync`,
+  name reused for a new recording, is kept. That duration is checked again in
+  the listing made right before each deletion, so a change while the
+  confirmation is open is caught too. `download-all`, `sync`,
   `wifi-transfer` and `watch` record a download only when the transfer was
   exactly the size the device announced; a transfer without an announced size
   is tried again. One that still can't be checked is saved but marked

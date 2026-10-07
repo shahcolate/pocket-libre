@@ -492,6 +492,22 @@ def test_delete_downloaded_keeps_a_recording_that_grew(device, tmp_path):
     assert "Keeping" in result.output
 
 
+def test_a_recording_that_changes_after_the_check_is_kept(device, tmp_path, monkeypatch):
+    """The copy is checked against the listing made before the confirmation;
+    the listing made just before deleting must still show the same recording."""
+    grown = Recording(DONE.date, DONE.timestamp, 120)  # DONE's copy is of 97 s
+
+    def confirm(*args, **kwargs):
+        device.recordings = [grown, NEW]  # changed while the prompt was open
+        return True
+
+    monkeypatch.setattr(cli.click, "confirm", confirm)
+    result = _run("delete", "--downloaded", "--output-dir", str(tmp_path))
+    assert result.exit_code == 1, result.output  # fewer deleted than confirmed
+    assert device.deleted == []
+    assert "now lists 120s" in " ".join(result.output.split())
+
+
 def test_deleting_several_on_one_date_lists_it_once_per_deletion(device, tmp_path):
     second = Recording(DONE.date, "20261003081900", 50)
     _write(tmp_path, second, 200_000, recorded=200_000)

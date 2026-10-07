@@ -690,8 +690,18 @@ async def _delete_recordings(address: str, session_key: str,
             if listed is None:
                 console.print(f"  [red]Could not list {rec.date}; kept {name}.[/red]")
                 continue
-            if all(r.timestamp != rec.timestamp for r in listed):
+            now = next((r for r in listed if r.timestamp == rec.timestamp), None)
+            if now is None:
                 console.print(f"  [red]{name} is not on the device.[/red]")
+                continue
+            # The copy was checked against an earlier listing (before the
+            # confirmation, or before earlier deletions). If the device now
+            # lists a different duration, the recording grew or the name was
+            # reused since, and the copy is not of what would be deleted.
+            # `delete --date/--timestamp` names one explicitly (duration 0).
+            if rec.duration_s > 0 and now.duration_s != rec.duration_s:
+                console.print(f"  [yellow]Keeping {name}: the device now lists "
+                              f"{now.duration_s}s, the copy is of {rec.duration_s}s.[/yellow]")
                 continue
             gone, remaining = await cmd.delete_and_list(rec)
             if remaining is not None:
