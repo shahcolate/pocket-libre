@@ -127,7 +127,8 @@ def setup(ctx):
         new_config["device"]["address"] = addr
 
     console.print("\n  [bold]Session Key[/bold] (16 characters, authenticates the BLE connection)")
-    console.print("  [dim]Capture it from the vendor app's APP&SK& write — see PROTOCOL.md.[/dim]")
+    console.print("  [dim]Capture it from the vendor app's APP&SK& write (see PROTOCOL.md), or leave it\n"
+                  "  blank and pair a reset Pocket without the app: pocket-libre pair[/dim]")
     sk = _prompt_secret("  Session key", new_config["device"].get("session_key", ""))
     if sk:
         if len(sk) != 16:
@@ -202,8 +203,9 @@ def setup(ctx):
         console.print(Panel(
             "[bold yellow]No session key configured.[/bold yellow]\n\n"
             "Device commands (status, list, download, sync, web) won't work\n"
-            "until you set one. Capture it from the vendor app's APP&SK& write\n"
-            "(see PROTOCOL.md), then run:\n"
+            "until you set one. Either pair a reset Pocket without the vendor app:\n"
+            "  pocket-libre pair\n"
+            "or capture the app's key from its APP&SK& write (see PROTOCOL.md) and run:\n"
             "  pocket-libre config --set device.session_key=YOUR-KEY",
             border_style="yellow",
         ))
@@ -409,6 +411,151 @@ def status(ctx, address: str | None, session_key: str | None):
             ))
 
     asyncio.run(_run())
+
+
+# After pairing, the wait before each of the three tries to reconnect.
+PAIR_RECONNECT_DELAY = 2.0
+
+
+async def _scan_pockets(timeout: float = 5.0) -> list[tuple[str, str]]:
+    """(name, address) of every likely Pocket in range."""
+    from bleak import BleakScanner
+
+    from pocket_libre.scanner import is_likely_pocket
+
+    found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    return [(d.name, d.address) for d, _adv in found.values() if is_likely_pocket(d.name)]
+
+
+@cli.command()
+@click.option("--address", default=None,
+              help="BLE address of the Pocket (default: the one Pocket in range).")
+@click.option("--key", "session_key", default=None,
+              help="Session key to pair with (default: a new random one).")
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="Replace a configured device without asking.")
+@click.pass_context
+def pair(ctx, address: str | None, session_key: str | None, assume_yes: bool):
+    """Pair a reset Pocket with a session key of its own, without the vendor app.
+
+    \b
+    After a hardware reset the device takes the first session key it is sent
+    and refuses every other one from then on. To reset: triple-click the side
+    button (the LED blinks red), then press and hold it until the red
+    blinking stops; the LED then pulses blue.
+
+    \b
+    pair sends the reset device a new random key (or --key) and saves it, with
+    the device's address, as this machine's device in the config. The vendor
+    app pairs the same way, so a device paired here is not reachable from the
+    app until it is reset and paired there.
+    """
+    from pocket_libre import config as cfg
+    from pocket_libre.commands import generate_session_key, is_valid_session_key
+
+    if session_key is not None and not is_valid_session_key(session_key):
+        raise click.BadParameter("must be 16 letters and digits", param_hint="--key")
+    key = session_key or generate_session_key()
+
+    if not address:
+        console.print("[dim]Looking for a Pocket in range...[/dim]")
+        pockets = asyncio.run(_scan_pockets())
+        if not pockets:
+            console.print("[red]No Pocket found.[/red] Make sure it is reset (the LED "
+                          "pulses blue), nearby, and not connected to a phone.")
+            raise SystemExit(1)
+        if len(pockets) > 1:
+            listing = "\n".join(f"  {name}  {addr}" for name, addr in pockets)
+            raise click.UsageError(f"Several Pockets in range; pick one with --address:\n{listing}")
+        name, address = pockets[0]
+        console.print(f"Found {escape(name)} ({address})")
+
+    config = ctx.obj["config"]
+    device = config.get("device", {}) if isinstance(config.get("device"), dict) else {}
+    if device.get("session_key") and not assume_yes:
+        click.confirm(f"This replaces the configured device ({device.get('address') or 'no address'}) "
+                      "and its session key in the config. Continue?", abort=True)
+
+    # Saved before it is sent: once the device takes the key, it refuses any
+    # other, so the key must not be lost if this run dies right after.
+    previous = cfg.CONFIG_FILE.read_text(encoding="utf-8") if cfg.CONFIG_FILE.exists() else None
+    new_config = {section: dict(values) for section, values in config.items()
+                  if isinstance(values, dict)}
+    new_config.setdefault("device", {}).update(address=address, session_key=key)
+    cfg.save_config(new_config)
+
+    def restore() -> None:
+        if previous is None:
+            cfg.CONFIG_FILE.unlink(missing_ok=True)
+        else:
+            cfg.CONFIG_FILE.write_text(previous, encoding="utf-8")
+
+    state = {"sent": False, "paired": None}
+
+    async def _pair() -> bool | None:
+        async with PocketCommander(address) as cmd:
+            state["sent"] = True
+            state["paired"] = await cmd.login(key)
+            return state["paired"]
+
+    async def _check() -> tuple[int, str] | None:
+        # The device drops the connection about a second after it takes its
+        # first key (the vendor app's first connection times out the same way),
+        # so the clock and a check go over a new connection with the new key.
+        for _ in range(3):
+            await asyncio.sleep(PAIR_RECONNECT_DELAY)
+            try:
+                async with PocketCommander(address) as cmd:
+                    if await cmd.authenticate(key):
+                        await cmd.set_time()
+                        return await cmd.get_battery(), await cmd.get_firmware()
+            except Exception:
+                pass
+        return None
+
+    try:
+        paired = asyncio.run(_pair())
+    except Exception as e:
+        if not state["sent"]:
+            restore()
+            console.print(f"[red]Could not connect to {address}: {e}[/red] The config is "
+                          "unchanged.")
+        elif state["paired"]:
+            paired = True
+        else:
+            console.print(f"[red]The connection failed during pairing: {e}[/red] The device "
+                          "may have taken the key, so it stays in the config: check with "
+                          "`pocket-libre status`.")
+        if not state["paired"]:
+            raise SystemExit(1) from None
+    if paired:
+        checked = asyncio.run(_check())
+        if checked:
+            battery, firmware = checked
+            console.print(Panel(
+                f"[bold]Paired[/bold] {address}\n"
+                f"[bold]Battery:[/bold] {battery}%   [bold]Firmware:[/bold] {firmware}\n"
+                f"The session key is saved in {cfg.CONFIG_FILE}.",
+                title="Pocket paired", border_style="green",
+            ))
+        else:
+            console.print(f"[green]Paired[/green] {address}; the session key is saved in "
+                          f"{cfg.CONFIG_FILE}. The device did not take a second connection "
+                          "yet (it drops the first one after pairing); check with "
+                          "`pocket-libre status`.")
+        return
+    if paired is False:
+        restore()
+        console.print("[red]This Pocket already has a session key[/red] and refused the "
+                      "new one; the config is unchanged. To pair it anyway, do a hardware "
+                      "reset first (see `pocket-libre pair --help`).")
+        raise SystemExit(1)
+    if paired is None:
+        console.print("[yellow]The Pocket did not answer the pairing request.[/yellow] It may "
+                      "have taken the key anyway, so the new key stays in the config: check "
+                      "with `pocket-libre status`, and if that fails, reset the device and "
+                      "run pair again.")
+        raise SystemExit(1)
 
 
 @cli.command()

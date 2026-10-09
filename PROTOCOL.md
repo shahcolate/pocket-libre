@@ -64,9 +64,36 @@ is.
 
 ```
 >> APP&SK&<16-char-session-key>
-<< MCU&SK&OK
+<< MCU&SK&OK                      # the device's key
+<< MCU&SK&ERR                     # any other key; the device then drops the connection
 ```
 The 16-character session key authenticates the connection. Capture yours from an HCI capture of the vendor app's `APP&SK&` write (e.g. PacketLogger on macOS/iOS, or Android's Bluetooth HCI snoop log) — `pocket-libre sniff` cannot see it, since it only observes notifications on its own connection. The first 8 characters are reused as the device's WiFi AP password — treat the key as a secret.
+
+**How a device gets its key (pairing).** There is no separate pairing command,
+and no BLE pairing or encryption: the link stays unencrypted. After a
+**hardware reset** the device takes the **first** `APP&SK&<key>` it receives,
+answers `MCU&SK&OK` followed by an unsolicited `MCU&WIFIO`, and from then on
+accepts only that key. Any other key gets `MCU&SK&ERR` and a disconnect. The
+vendor app pairs exactly this way, with the account's key as the first
+`APP&SK&` of its first connection, which is why that key works on every
+device of the account. `pocket-libre pair` pairs the same way with a key of
+its own. Confirmed on firmware 1.8 (2026-10-08):
+
+| After a hardware reset | Reply |
+|---|---|
+| `APP&SK&<new key A>` (first ever) | `MCU&SK&OK`, `MCU&WIFIO` |
+| `APP&SK&<key B>` | `MCU&SK&ERR`, then disconnect |
+| `APP&SK&<key A>` | `MCU&SK&OK` |
+
+About a second after it takes its first key, the device drops that
+connection (the link times out); the next connection with the new key works.
+The vendor app's first connection to a reset device ends the same way, after
+which it reconnects. So after pairing, reconnect before sending anything else.
+
+The hardware reset is the one the vendor documents: triple-click the side
+button (the LED blinks red), then press and hold it until the red blinking
+stops; the LED then pulses blue. A "reset" that leaves the key in place
+exists too: after it the device still accepted only its old key.
 
 ### Device Info
 

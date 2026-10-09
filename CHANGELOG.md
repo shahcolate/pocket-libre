@@ -13,6 +13,14 @@ confirmed it on 1.7.
 
 ### Added
 
+- **`pair` pairs a reset Pocket without the vendor app.** After a hardware
+  reset the device takes the first session key it is sent and refuses every
+  other one (`MCU&SK&ERR`, then a disconnect); confirmed on firmware 1.8.
+  `pair` finds the Pocket, sends it a new random key (or `--key`), and saves
+  the address and key to the config before sending, so a key the device has
+  taken is never lost. A device that refuses keeps the old config. Also
+  `PocketCommander.login()`, which tells `MCU&SK&ERR` from no answer, and
+  `commands.generate_session_key()`.
 - **`wifi-transfer` downloads recordings over WiFi at about 1 MB/s** on
   firmware 1.7 and 1.8 (WiFi firmware V9). It raises the device's access
   point, joins it, requests each recording as a BLE transfer and switches it to

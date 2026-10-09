@@ -105,10 +105,32 @@ The wizard scans for your device, asks for your session key and API keys, and
 writes everything to `~/.pocket-libre/config.toml` with mode `600`. After that
 you never pass `--address` or keys on the command line again.
 
+### Pairing without the vendor app
+
+A device takes the first session key it is sent after a hardware reset and
+refuses every other one from then on. `pocket-libre pair` uses that to pair a
+device with a new random key of its own, so you need neither the vendor app
+nor a packet capture:
+
+1. Hardware-reset the Pocket: triple-click the side button (the LED blinks
+   red), then press and hold it until the red blinking stops. The LED then
+   pulses blue.
+2. Make sure no phone is connected to it, then run:
+
+```bash
+pocket-libre pair
+```
+
+It finds the Pocket, pairs it, and saves its address and the new key to the
+config. The vendor app can't connect to a device paired this way until it is
+reset and paired in the app again (which in turn locks out this key).
+
 ### Getting your session key
 
-The 16-character session key authenticates the BLE connection. The vendor app
-receives it during pairing, so you need to capture it once from an HCI trace.
+To keep using the vendor app alongside pocket-libre, use the key the app
+pairs with instead. The 16-character session key authenticates the BLE
+connection. The vendor app sends it as the first key after pairing, so you
+need to capture it once from an HCI trace.
 
 **macOS/iOS.** Use [PacketLogger](https://developer.apple.com/bluetooth/), which
 ships with Additional Tools for Xcode. Start a capture, open the vendor app, let
@@ -174,6 +196,7 @@ isn't scanning flat out all day.
 | Command | Description |
 |---------|-------------|
 | `setup` | Interactive setup wizard |
+| `pair` | Pair a reset Pocket with a key of its own, without the vendor app |
 | `web` | Launch the web interface |
 | `watch` | Auto-sync whenever the device is in range |
 | `config` | View or edit configuration |

@@ -15,6 +15,8 @@ import asyncio
 import json
 import os
 import re
+import secrets
+import string
 import time
 import uuid
 from dataclasses import dataclass
@@ -195,6 +197,19 @@ def has_complete_copy(path, listed: Recording) -> bool:
         return path.stat().st_size == size
     except OSError:
         return False
+
+
+SESSION_KEY_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def generate_session_key() -> str:
+    """A new random 16-character session key, for pairing a reset device."""
+    return "".join(secrets.choice(SESSION_KEY_ALPHABET) for _ in range(16))
+
+
+def is_valid_session_key(key: str) -> bool:
+    """16 letters and digits, the form the vendor app uses."""
+    return len(key) == 16 and key.isascii() and key.isalnum()
 
 
 class PocketCommander:
@@ -385,8 +400,22 @@ class PocketCommander:
     async def authenticate(self, session_key: str) -> bool:
         if not session_key:
             raise ValueError("No session key configured.")
+        return await self.login(session_key) is True
+
+    async def login(self, session_key: str) -> bool | None:
+        """APP&SK&<key>: True for MCU&SK&OK, False for MCU&SK&ERR, None if no
+        answer arrived in time (which is not a refusal).
+
+        After a hardware reset the device takes the first key it is sent and
+        refuses every other one from then on, dropping the connection after
+        MCU&SK&ERR (see PROTOCOL.md, "Session key").
+        """
         responses = await self._send(f"SK&{session_key}")
-        return any("MCU&SK&OK" in r for r in responses)
+        if any("MCU&SK&OK" in r for r in responses):
+            return True
+        if any("MCU&SK&ERR" in r for r in responses):
+            return False
+        return None
 
     async def get_battery(self) -> int:
         responses = await self._send("BAT")
