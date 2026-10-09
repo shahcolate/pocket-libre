@@ -46,8 +46,8 @@ is.
 > receives `MCU&` replies there, and receives audio on `001120A1`; both work on
 > 1.8. The vendor app on 1.8 (Android HCI log) writes commands to handle
 > `0x002b`, gets replies on `0x0030` and audio on `0x002d`, after enabling
-> notifications through the CCCDs at `0x002e` and `0x0031`. The UUID↔handle
-> mapping in this table hasn't been re-verified on 1.8.
+> notifications through the CCCDs at `0x002e` and `0x0031`. The handles in the
+> table above are from 1.3.3; on 1.8 they differ (below).
 >
 > Don't subscribe to `FFD2` on 1.8: the subscription never completed and the
 > device dropped the connection.
@@ -57,6 +57,24 @@ is.
 > 227-byte chunk. The phone's HCI log shows each notification once, so this is
 > on the receiving side. Deduplicate command replies; for audio, compare the
 > byte count with `MCU&U&<size>`.
+
+**GATT on firmware 1.8**, from the vendor app's own service discovery in an
+iOS HCI trace (2026-10-08):
+
+| Service | Characteristic | Value handle | Properties | Used by the vendor app |
+|---------|----------------|--------------|------------|------------------------|
+| 1801 | 2A05 (Service Changed) | 0x0003 | Indicate | indications on (CCCD `0x0004`) |
+| 180F | 2A19 (Battery Level) | 0x0012 | Read, Notify | — |
+| FFD0 | FFD1 / FFD2 / FFD3 | 0x0016 / 0x0018 / 0x001b | Write / Notify / Write+Notify | — |
+| E49A3001 | E49A3002 / E49A3003 | 0x001f / 0x0021 | Write / Notify | — |
+| E49A25F8 | E49A25E0 / E49A28E1 | 0x0025 / 0x0027 | Write / Notify | — |
+| 001120A0 | **001120A2** | **0x002b** | Write | **commands (`APP&…`)** |
+| 001120A0 | **001120A1** | **0x002d** | Notify | **audio** (CCCD `0x002e`) |
+| 001120A0 | **001120A3** | **0x0030** | Write without response, Notify | **replies (`MCU&…`)** (CCCD `0x0031`) |
+
+So on 1.8 the vendor app uses only the `001120A0` service: the Android
+handles above are the same characteristics. The `E49A…` services are present
+but unused.
 
 ## Command Reference
 
@@ -78,7 +96,7 @@ The 16-character session key authenticates the connection. Capture yours from an
 | `APP&SPACE` | `MCU&SPA&060846&061032` | Storage free & total (MB) |
 | `APP&STE` | `MCU&STE&0` | Device state (0=idle) |
 | `APP&T&YYYYMMDDHHmmss` | `MCU&T&OK` | Set device clock (the vendor app sends UTC) |
-| `APP&REC&SECEN` | `MCU&REC&CON` | Recording config |
+| `APP&REC&SECEN` | `MCU&REC&CON` | Side-switch position: `CON` or `CALL` (see [Recording events](#recording-events)) |
 | `APP&MAC` | `MCU&MAC&<12 hex digits>` | Device MAC |
 | `APP&GET&USB` | `MCU&USB&<0\|1>` | USB mass storage state; see [USB Mass Storage](#usb-mass-storage) |
 | `APP&WPING` | `MCU&WPING` | Heartbeat while the WiFi AP is up |
@@ -93,8 +111,47 @@ Other commands named in the vendor app, not exercised here: `WIFID`, `WIFIE`,
 `WIFIM&<n>` (switch the WiFi module between AP and client mode), `WIFIX`,
 `WIFIJ`/`WIFIL`/`WSCAN`/`WIFIP`/`UPL`/`AUTOUP`/`SYNC`/`SCHED` (home-WiFi
 upload), `OTA`/`WOTA` (firmware updates), `D&` (delete?), `PAU`, `RESU`, `STA`,
-`STO`, `SHUT`, `BLE&OFF`, `LNP`, `LNS`, `LOG`. Replies seen only from the
-device: `MCU&OFF` (end of a transfer), `MCU&SHUT`.
+`SHUT`, `BLE&OFF`, `LNP`, `LNS`, `LOG`. Replies seen only from the
+device: `MCU&OFF` (end of a transfer), `MCU&SHUT`, and the recording events
+below. The vendor app also sends `APP&STO` (see below).
+
+### Recording events
+
+Seen on firmware 1.8 in an iOS HCI trace of the vendor app (2026-10-08),
+unsolicited on the reply characteristic while the app was connected:
+
+```
+<< MCU&REC&CALL                    # the side switch was moved
+<< MCU&REC&CON                     # ... and back
+<< MCU&REC&CON
+<< MCU&STA&20261009032636          # a recording started; its name
+   [the recording streams live on 001120A1, see below]
+<< MCU&STO                         # the recording stopped (8.5 s later)
+>> APP&U&2026-10-09&20261009032636 # the app fetches it right away over BLE
+<< MCU&U&32008
+<< MCU&OFF
+>> APP&STO                         # sent by the app after the transfer; no reply
+```
+
+- `MCU&STA&<name>` arrives when a recording starts and carries the name it
+  will be listed under; `MCU&STO` arrives when it stops. A client that stays
+  connected can fetch a recording the moment it ends instead of polling `LIST`.
+- `MCU&REC&CALL` / `MCU&REC&CON` arrived as the side switch was moved, and
+  `APP&REC&SECEN` answers with the current position. `CON` is presumably
+  "conversation" and `CALL` the phone-call position. **Unconfirmed guess:**
+  recordings made in the `CALL` position may be the ones named `PH…` (see
+  [Recording names](#file-listing)); a recording made in that position would
+  settle it.
+- What `APP&STO` does is unknown. It got no reply and nothing visible
+  changed.
+
+**Live audio while recording.** As soon as `MCU&STA` arrived, the recording
+streamed on `001120A1` at 4000 bytes/s, as it was being made: 238
+notifications of 60–160 bytes (about 134 on average). The 32,008 bytes streamed during the
+recording were **byte for byte the file** the app then downloaded with
+`APP&U&` (`MCU&U&32008`). A connected, subscribed client therefore gets each
+recording without a download.
+
 
 ### File Listing
 
@@ -135,8 +192,8 @@ recording started. A second form, `PH` + `YYMMDDHHmmss`, also occurs:
 `PH261002211958` (2026-10-02 21:19:58) was seen next to ordinary names on
 firmware 1.7 ([#11](https://github.com/shahcolate/pocket-libre/issues/11)),
 and the form has also turned up on 1.8. It lists and downloads like any other
-recording. What makes the device use it is unknown; a recording mode such as
-a phone call is one guess. Treat the timestamp as an opaque name, not
+recording. What makes the device use it is unknown; the side switch's
+`CALL` position is the likeliest guess (see [Recording events](#recording-events)). Treat the timestamp as an opaque name, not
 something to parse as a date.
 
 The name comes from the device clock, which `APP&T&` sets. The vendor app sets
@@ -201,7 +258,15 @@ the device sends `MCU&OFF` right away.
 
 Throughput: about 3–4 KB/s in the original 1.3.3 capture. On firmware 1.8,
 about 26 KB/s to a Linux laptop and about 65 KB/s to an Android phone. On
-firmware 1.7, about 53–56 KB/s to a Mac. WiFi
+firmware 1.7, about 53–56 KB/s to a Mac. To an iPhone (vendor app, 1.8), a
+32,008-byte recording took 0.47 s, about 67 KB/s.
+
+New connections sometimes go silent during the opening queries. In the iOS
+trace, the vendor app's connection right after its first one stopped getting
+replies part way through (`APP&FW` unanswered) and ended in a link
+supervision timeout (disconnect reason `0x08`); the app reconnected, and the
+device answered normally. (The first connection, which paired the device,
+ended the same way; a device drops the connection right after it is paired.) WiFi
 transfer (below) runs at about 1 MB/s.
 
 ### WiFi Transfer (Fast) — decoded on firmware 1.8

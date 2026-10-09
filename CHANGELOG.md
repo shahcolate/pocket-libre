@@ -13,6 +13,12 @@ confirmed it on 1.7.
 
 ### Added
 
+- PROTOCOL.md documents what an iOS HCI trace of the vendor app showed on
+  firmware 1.8: the GATT handles (the app uses only the `001120A0` service),
+  the unsolicited recording events (`MCU&STA&<name>`, `MCU&STO`,
+  `MCU&REC&CALL`/`CON` for the side switch), that a recording streams live on
+  `001120A1` byte for byte as the file it becomes, and that the app fetches a
+  recording over BLE as soon as it stops, then sends `APP&STO`.
 - **`wifi-transfer` downloads recordings over WiFi at about 1 MB/s** on
   firmware 1.7 and 1.8 (WiFi firmware V9). It raises the device's access
   point, joins it, requests each recording as a BLE transfer and switches it to
