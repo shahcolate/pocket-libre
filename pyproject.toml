@@ -34,10 +34,20 @@ classifiers = [
 dependencies = [
     "bleak>=0.21.0",
     "click>=8.1.0",
+    # Still a base dependency: it is the default transcription backend, so
+    # dropping it would break `pip install -e . && pocket-libre sync`. The
+    # faster-whisper-xxl backend needs none of it, and an install that only
+    # ever uses that one can skip torch with `pip install --no-deps`.
     "openai-whisper>=20231117",
     "rich>=13.0.0",
     "anthropic>=0.30.0",
-    "fastapi[standard]>=0.115.0",
+    # Plain fastapi plus the server, not fastapi[standard]: that extra pulls in
+    # fastapi-cloud-cli, and with it a Sentry client and OpenTelemetry
+    # exporters. None of it is used here, and shipping a crash reporter inside
+    # a tool whose whole promise is that your audio never leaves your machine
+    # is an own goal.
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 
