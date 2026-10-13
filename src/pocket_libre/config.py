@@ -4,7 +4,10 @@ Loads/saves config from ~/.pocket-libre/config.toml.
 Resolution chain: CLI flag > env var > config file > default.
 """
 
+import getpass
 import os
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -75,6 +78,43 @@ def _escape_toml(value: str) -> str:
     return "".join(out)
 
 
+def _restrict_windows_acl(path: Path) -> bool:
+    """Rewrite the file's ACL so only the current user can read it."""
+    user = os.environ.get("USERNAME") or getpass.getuser()
+    if not user:
+        return False
+    try:
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def restrict_permissions(path: Path) -> bool:
+    """Make `path` readable only by its owner. Returns True when enforced.
+
+    `chmod` is a no-op on Windows: the file keeps whatever ACL it inherited, so
+    a config holding the session key (which is also the device's WiFi password)
+    and the Anthropic key stayed readable by every account on the machine. On
+    Windows the ACL has to be rewritten instead, which is what `icacls` does.
+    """
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+    if os.name == "nt":
+        return _restrict_windows_acl(path)
+
+    try:
+        return stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+    except OSError:
+        return False
+
+
 def save_config(config: dict):
     """Write config dict to ~/.pocket-libre/config.toml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -95,10 +135,7 @@ def save_config(config: dict):
 
     CONFIG_FILE.write_text("\n".join(lines), encoding="utf-8")
     # Config holds API keys and the device session key — keep it owner-only.
-    try:
-        CONFIG_FILE.chmod(0o600)
-    except OSError:
-        pass
+    restrict_permissions(CONFIG_FILE)
 
 
 def get(config: dict, section: str, key: str,
