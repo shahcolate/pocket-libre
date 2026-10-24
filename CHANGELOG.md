@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A failed connection in `pair` and `setup` now says why. A BLE timeout has
   no message of its own, so the error used to end at the colon
   ([#38](https://github.com/shahcolate/pocket-libre/issues/38)).
+- Pairing a factory-reset Pocket now works on Linux by selecting its Bluetooth
+  LE bearer before connecting
+  ([#38](https://github.com/shahcolate/pocket-libre/issues/38)).
 
 ## [1.2.0] — 2026-10-12
 

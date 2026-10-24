@@ -358,6 +358,11 @@ connected to the vendor app — it accepts one BLE connection at a time, so
 force-quit the phone app first. On Linux, BLE scanning usually needs
 `bluetoothd` running and your user in the `bluetooth` group.
 
+**Pairing a factory-reset Pocket fails on Linux.** Pairing needs a BlueZ
+version that supports the Bluetooth LE bearer setting. On systems where that
+setting is experimental, enable `Experimental = true` under `[General]` in
+`/etc/bluetooth/main.conf` and restart `bluetoothd`.
+
 **Authentication fails.** The session key is per *account*, not per device, so
 a key captured from one phone works for every device on that account — but it
 changes if you sign in as someone else. Re-capture it with the

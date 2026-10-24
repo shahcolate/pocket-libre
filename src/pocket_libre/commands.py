@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import string
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -212,6 +213,51 @@ def is_valid_session_key(key: str) -> bool:
     return len(key) == 16 and key.isascii() and key.isalnum()
 
 
+_PREFERRED_BEARER_ADDRESSES: set[str] = set()
+
+
+async def _prefer_le_bearer(address: str) -> None:
+    """Tell BlueZ to use its LE bearer instead of trying BR/EDR first.
+
+    BlueZ's generic ``Device1.Connect`` call can choose the Classic Bluetooth
+    bearer for a device whose cached record contains both bearers. The Pocket
+    is a BLE-only peripheral, so that choice ends in a page timeout. The
+    ``bearer`` command changes BlueZ's per-device preference without creating
+    a Bluetooth pairing or encryption key.
+
+    This is deliberately best effort: the command is Linux/BlueZ-specific and
+    older BlueZ versions may not expose the preference. BlueZ keeps the
+    preference, so only attempt it once per address in this process.
+    """
+    if sys.platform != "linux":
+        return
+    if address in _PREFERRED_BEARER_ADDRESSES:
+        return
+    _PREFERRED_BEARER_ADDRESSES.add(address)
+
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "bluetoothctl",
+            "--timeout",
+            "5",
+            "bearer",
+            address,
+            "le",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(process.wait(), timeout=6.0)
+    except (OSError, asyncio.TimeoutError):
+        # Bleak can still connect when bluetoothctl is unavailable or the
+        # running BlueZ version does not support PreferredBearer.
+        pass
+    finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+
+
 class PocketCommander:
     """Send commands to a Pocket device and collect responses."""
 
@@ -246,6 +292,7 @@ class PocketCommander:
                 f"Device {self.address} not found. "
                 "Make sure it's awake (press the button) and nearby."
             )
+        await _prefer_le_bearer(self.address)
         self._disconnected = False
         self.client = BleakClient(
             device,
