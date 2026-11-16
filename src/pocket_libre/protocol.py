@@ -79,6 +79,10 @@ MP3_FRAME_HEADER = b"\xff\xf3\x48\xc4"
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_BITRATE_KBPS = 32
+# A BLE transfer sends the file in blocks of this size, each split into
+# MTU-sized notifications with a short one closing the block. Firmware 1.8.9
+# sends that closing notification twice (issue #42).
+BLE_BLOCK_SIZE = 4096
 
 
 # ──────────────────────────────────────────────
