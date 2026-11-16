@@ -739,6 +739,45 @@ def download(ctx, address: str | None, session_key: str | None,
     asyncio.run(_run())
 
 
+@cli.command()
+@click.argument("paths", nargs=-1, required=True,
+                type=click.Path(exists=True, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
+@click.option("--no-backup", is_flag=True, help="Don't keep the original as <name>.mp3.orig.")
+def repair(paths: tuple[Path, ...], dry_run: bool, no_backup: bool):
+    """Fix recordings downloaded over BLE from firmware 1.8.9 before #42.
+
+    Those downloads have a duplicated 192-byte fragment about every 4 KB,
+    heard as a tick about once a second. Takes files or folders (every .mp3
+    below them). Files without the problem are left untouched.
+    """
+    from pocket_libre.mp3repair import DUPLICATE_SIZE, repair_file
+
+    files: list[Path] = []
+    for p in paths:
+        files.extend(sorted(p.rglob("*.mp3")) if p.is_dir() else [p])
+
+    fixed = clean = 0
+    for f in files:
+        try:
+            result = repair_file(f, write=not dry_run, backup=not no_backup)
+        except OSError as e:
+            console.print(f"[red]{escape(str(f))}: {escape(_reason(e))}[/red]")
+            continue
+        if not result.changed:
+            clean += 1
+            continue
+        fixed += 1
+        verb = "would remove" if dry_run else "removed"
+        note = (f", {result.unrepaired} other break(s) left as they were"
+                if result.unrepaired else "")
+        console.print(f"{escape(str(f))}: {verb} {result.removed:,} duplicates "
+                      f"({result.removed * DUPLICATE_SIZE:,} bytes){note}")
+
+    verb = "Would fix" if dry_run else "Fixed"
+    console.print(f"[bold]{verb} {fixed} file(s); {clean} had nothing to fix.[/bold]")
+
+
 def _plan_downloads(jobs: list[tuple[Recording, Path]], listed: int,
                     since: str | None = None, overwrite: bool = False,
                     hint: str = "") -> tuple[list[tuple[Recording, Path]], list[Path]]:

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `repair` removes the duplicated fragments from recordings downloaded over
+  BLE on firmware 1.8.9 before this fix. It follows the MP3 frame chain and
+  only cuts where the chain breaks and 192 bytes repeat the 192 before them.
+  Originals are kept as `<name>.mp3.orig`
+  ([#42](https://github.com/shahcolate/pocket-libre/issues/42)).
+
 ### Fixed
 
 - BLE downloads on firmware 1.8.9 no longer glitch about once a second. The
