@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-11-16
+
+Summaries, analyses, chat and speaker labels can run on a model on your own
+machine, so nothing has to leave it. `search` finds what was said across every
+transcript, in the terminal and in the web Library. `doctor` checks the whole
+setup and says what to fix. BLE downloads on firmware 1.8.9 no longer tick
+once a second, and `repair` fixes recordings saved before. Pairing a reset
+Pocket on Linux no longer times out where BlueZ supports the LE bearer setting.
+
+### Contributors
+
+Thank you to everyone who made this release:
+
+- [@cimm](https://github.com/cimm): pairing a factory-reset Pocket on Linux
+  through BlueZ's LE bearer
+  ([#41](https://github.com/shahcolate/pocket-libre/pull/41)), and the report
+  that found it ([#38](https://github.com/shahcolate/pocket-libre/issues/38)).
+- [@erwinunderscorealf](https://github.com/erwinunderscorealf): the firmware
+  1.8.9 duplicate-notification report, with the cycle, the byte counts and the
+  fix already worked out
+  ([#42](https://github.com/shahcolate/pocket-libre/issues/42)).
+- [@itripn](https://github.com/itripn): the request and design for local and
+  self-hosted models ([#39](https://github.com/shahcolate/pocket-libre/issues/39)).
+
 ### Added
 
 - Summaries, entities, mind maps, chat and speaker labels can run on a local
@@ -418,7 +442,8 @@ All of the below were found in a pre-release audit of `0.1.0`. See
   single-user tool; keep it on loopback.
 - Verified against one device: `PKT01`, firmware 1.3.3.
 
-[Unreleased]: https://github.com/shahcolate/pocket-libre/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/shahcolate/pocket-libre/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/shahcolate/pocket-libre/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/shahcolate/pocket-libre/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/shahcolate/pocket-libre/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/shahcolate/pocket-libre/releases/tag/v1.0.0
