@@ -76,6 +76,86 @@ async def test_download_ble_records_expected_size_on_success():
     assert cmd.last_expected_size == len(payload)
 
 
+# ── Duplicated notifications on firmware 1.8.9 (#42) ──
+
+
+def _blocks(audio: bytes, duplicate: bool) -> list[bytes]:
+    """Split audio as the device does: 4096-byte blocks of 244-byte
+    notifications closed by a short one, which 1.8.9 sends twice."""
+    chunks = []
+    for start in range(0, len(audio), 4096):
+        block = audio[start:start + 4096]
+        packets = [block[i:i + 244] for i in range(0, len(block), 244)]
+        chunks.extend(packets)
+        if duplicate and len(block) == 4096:
+            chunks.append(packets[-1])
+    return chunks
+
+
+# Distinct content per byte, so a wrongly dropped packet shows.
+AUDIO = MP3_SYNC_WORD + bytes(i * 7 % 251 for i in range(3 * 4096 + 1000 - 2))
+
+
+@pytest.mark.asyncio
+async def test_duplicated_block_tail_is_dropped():
+    chunks = _blocks(AUDIO, duplicate=True)
+    raw = sum(map(len, chunks))
+    assert raw == len(AUDIO) + 3 * 192
+    cmd = _commander(chunks, expected=raw)
+    assert await cmd.download_ble(REC) == AUDIO
+    assert cmd.last_received_size == raw
+    assert cmd.last_duplicate_bytes == 3 * 192
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audio", [AUDIO, MP3_SYNC_WORD + b"\x00" * (5 * 4096)],
+                         ids=["audio", "silence"])
+async def test_nothing_dropped_without_duplicates(audio):
+    """Silence repeats itself; only a copy of a block's closing packet goes."""
+    chunks = _blocks(audio, duplicate=False)
+    cmd = _commander(chunks, expected=len(audio))
+    assert await cmd.download_ble(REC) == audio
+    assert cmd.last_duplicate_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_silent_duplicates_are_dropped():
+    audio = MP3_SYNC_WORD + b"\x00" * (2 * 4096)
+    chunks = _blocks(audio, duplicate=True)
+    cmd = _commander(chunks, expected=sum(map(len, chunks)))
+    assert await cmd.download_ble(REC) == audio
+
+
+@pytest.mark.asyncio
+async def test_size_check_counts_the_dropped_duplicates(monkeypatch):
+    """The announced size includes the duplicates: the cleaned file is
+    shorter than it and still verified."""
+    chunks = _blocks(AUDIO, duplicate=True)
+    raw = sum(map(len, chunks))
+
+    class _Commander(PocketCommander):
+        def __init__(self, address):
+            super().__init__(address)
+            self.client = _FakeClient(self, chunks)
+
+            async def fake_send(command, verbose=False):
+                return [f"MCU&U&{raw}"]
+
+            self._send = fake_send
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def authenticate(self, key):
+            return True
+
+    monkeypatch.setattr(commands, "PocketCommander", _Commander)
+    assert await commands.download_checked("addr", "key", REC, retry_delay=0) == (AUDIO, True)
+
+
 # ── download_with_retry ─────────────────────────
 
 
@@ -100,6 +180,7 @@ class _FakeCommander:
     async def download_ble(self, recording, progress_callback=None):
         data, expected, disconnected = _FakeCommander.attempts.pop(0)
         self.last_expected_size = expected
+        self.last_received_size = len(data)
         self._disconnected = disconnected
         return data
 

@@ -225,6 +225,7 @@ once they finish. To delete one recording, use
 | `delete` | Delete recordings from the device: one, or every one already downloaded (`--downloaded`) |
 | `sync` | Download, transcribe, and summarize what's new |
 | `process` | Process an existing audio file |
+| `repair` | Remove the duplicated fragments from BLE downloads made on firmware 1.8.9 before the fix ([#42](https://github.com/shahcolate/pocket-libre/issues/42)) |
 | `transcribe` | Transcribe locally with Whisper |
 | `convert` | Convert raw audio to WAV |
 | `wifi-transfer` | Download over WiFi instead of BLE, about 1 MB/s ([details](#wifi-transfer)) |
@@ -377,6 +378,14 @@ and syncs new recordings as they appear.
 `download` retries on its own; if it keeps failing, move the device closer and
 close the vendor app. Partial files are never left behind under the final
 name.
+
+**Recordings tick about once a second (firmware 1.8.9).** BLE downloads made
+before the fix for [#42](https://github.com/shahcolate/pocket-libre/issues/42)
+kept a duplicated fragment from every 4 KB the device sent. Run
+`pocket-libre repair ~/"Pocket Libre"` (or whichever folder you save to).
+It fixes the affected files in place, keeps each original as `<name>.mp3.orig`,
+and leaves healthy files alone; `--dry-run` shows what it would change.
+Transcripts made from the old files can be redone with `process`.
 
 **Transcription is slow or runs out of memory.** Whisper model size is the
 lever: `pocket-libre config --set defaults.whisper_model=base.en` is much

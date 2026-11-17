@@ -30,6 +30,7 @@ from rich.console import Console
 
 from pocket_libre.protocol import (
     AUDIO_NOTIFY_CHAR,
+    BLE_BLOCK_SIZE,
     BYTES_PER_SECOND,
     CMD_NOTIFY_CHAR,
     CMD_PREFIX,
@@ -280,6 +281,15 @@ class PocketCommander:
         self.discarded_audio_bytes = 0
         # Size announced by MCU&U for the most recent download_ble.
         self.last_expected_size = 0
+        # Bytes that arrived in the most recent download_ble, duplicates
+        # included. The announced size counts the duplicates too, so this is
+        # what gets checked against it.
+        self.last_received_size = 0
+        # Duplicate notifications dropped in the most recent download_ble.
+        self.last_duplicate_bytes = 0
+        self._block_fill = 0
+        self._block_tail: bytes | None = None
+        self._max_packet = 0
 
     async def __aenter__(self):
         # Scan first to ensure the device is discovered by CoreBluetooth
@@ -407,7 +417,29 @@ class PocketCommander:
             pass
 
     def _on_audio(self, sender: int, data: bytearray):
+        """Collect audio, dropping the duplicate that firmware 1.8.9 sends.
+
+        The device sends the file in 4096-byte blocks, each split into
+        MTU-sized notifications with a short one at the end (16 × 244 + 192
+        with a 247-byte MTU). Firmware 1.8.9 sends that short closing
+        notification twice, and the announced size counts both copies
+        (issue #42). A notification is dropped only when it comes right after
+        a short one that closed a block exactly and is byte-identical to it,
+        so a quiet passage, whose packets can repeat, is never touched.
+        """
+        self.last_received_size += len(data)
+        tail, self._block_tail = self._block_tail, None
+        if tail is not None and data == tail:
+            self.last_duplicate_bytes += len(data)
+            self._audio_event.set()
+            return
+
         self._audio_data.extend(data)
+        self._max_packet = max(self._max_packet, len(data))
+        self._block_fill += len(data)
+        if self._block_fill == BLE_BLOCK_SIZE and len(data) < self._max_packet:
+            self._block_tail = bytes(data)
+        self._block_fill %= BLE_BLOCK_SIZE
         self._audio_event.set()
 
     async def _send(self, command: str, verbose: bool = False) -> list[str]:
@@ -640,6 +672,11 @@ class PocketCommander:
         # Subscribe to audio notifications
         self._audio_data.clear()
         self.last_expected_size = 0
+        self.last_received_size = 0
+        self.last_duplicate_bytes = 0
+        self._block_fill = 0
+        self._block_tail = None
+        self._max_packet = 0
         await self.client.start_notify(AUDIO_NOTIFY_CHAR, self._on_audio)
 
         # Request the file
@@ -676,7 +713,7 @@ class PocketCommander:
                 continue
 
             stall_count = 0
-            current_size = len(self._audio_data)
+            current_size = self.last_received_size
 
             if progress_callback:
                 progress_callback(current_size, expected_size)
@@ -691,6 +728,11 @@ class PocketCommander:
                 await self.client.stop_notify(AUDIO_NOTIFY_CHAR)
             except BleakError:
                 pass
+        if self.last_duplicate_bytes:
+            console.print(
+                f"[dim]Dropped {self.last_duplicate_bytes:,} bytes of "
+                f"duplicated notifications.[/dim]"
+            )
         return bytes(self._audio_data)
 
     # ── WiFi Transfer ────────────────────────────
@@ -839,17 +881,20 @@ async def download_checked(
                     continue
 
                 # The device announces the exact size; anything less is a
-                # dropped link or a stalled transfer.
+                # dropped link or a stalled transfer. The size counts any
+                # duplicate notifications download_ble dropped (issue #42), so
+                # it is checked against what arrived, not what was kept.
                 expected_size = cmd.last_expected_size
-                if cmd._disconnected or len(data) < expected_size:
+                received = cmd.last_received_size
+                if cmd._disconnected or received < expected_size:
                     console.print(
-                        f"[yellow]Incomplete transfer: {len(data):,} of "
+                        f"[yellow]Incomplete transfer: {received:,} of "
                         f"{expected_size:,} bytes[/yellow]"
                     )
                     continue
 
                 # Checked against the raw transfer, before the trim below.
-                verified = 0 < expected_size == len(data)
+                verified = 0 < expected_size == received
 
                 # Trim to MP3 sync word
                 mp3_start = data.find(MP3_SYNC_WORD)

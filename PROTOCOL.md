@@ -286,6 +286,16 @@ no header. The last one is short, and then `MCU&OFF` follows. **The transfer
 only runs while the audio characteristic is subscribed;** without a subscriber
 the device sends `MCU&OFF` right away.
 
+The file is sent in 4096-byte blocks, each split into 16 notifications of 244
+bytes and a closing one of 192 (with a 247-byte MTU). **Firmware 1.8.9 sends
+that closing notification twice**, and the size in `MCU&U&<size>` counts both
+copies. Kept as is, the file has a repeated 192-byte fragment about every 4 KB,
+which shows up as an MP3 glitch about once a second. `download_ble` drops a
+notification that repeats the short one closing a block, and checks the
+announced size against everything that arrived, duplicates included
+([#42](https://github.com/shahcolate/pocket-libre/issues/42)). Other firmware
+versions and the WiFi path have not been checked for this.
+
 Throughput: about 3–4 KB/s in the original 1.3.3 capture. On firmware 1.8,
 about 26 KB/s to a Linux laptop and about 65 KB/s to an Android phone. On
 firmware 1.7, about 53–56 KB/s to a Mac. To an iPhone (vendor app, 1.8), a

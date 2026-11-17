@@ -269,6 +269,7 @@ class _BleCommander:
 
     async def download_ble(self, rec, progress_callback=None):
         self.last_expected_size, data = _BleCommander.attempts.pop(0)
+        self.last_received_size = len(data)
         return data
 
 
