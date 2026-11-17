@@ -307,7 +307,9 @@ def check_connect(config: dict) -> list[Check]:
     except Exception as e:
         hint = ("Wake the device and close the vendor app."
                 + (" On Linux, after a device reset BlueZ can try Bluetooth Classic and "
-                   f"time out (#38); bluetoothctl remove {address} may help."
+                   "time out (#38). Pocket Libre asks BlueZ for the LE bearer, which "
+                   "needs Experimental = true under [General] in /etc/bluetooth/main.conf "
+                   "on some BlueZ versions; restart bluetoothd after changing it."
                    if sys.platform.startswith("linux") else ""))
         return [Check("Connection", FAIL, f"Couldn't connect: {str(e) or type(e).__name__}", hint)]
     if result is None:
