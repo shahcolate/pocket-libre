@@ -242,7 +242,7 @@ mark { background: var(--yellow); color: var(--bg); border-radius: 2px; padding:
       <h3>Language Model</h3>
       <div class="form-group">
         <label>Provider</label>
-        <select id="cfgLlmProvider" onchange="updateLlmFields()">
+        <select id="cfgLlmProvider" onchange="onLlmProviderChange()">
           <option value="anthropic">Anthropic (Claude)</option>
           <option value="openai">Local or OpenAI-compatible (Ollama, LM Studio, llama.cpp, vLLM)</option>
         </select>
@@ -919,6 +919,13 @@ async function loadSettings() {
     if (cfg.defaults?.whisper_model) document.getElementById('cfgWhisperModel').value = cfg.defaults.whisper_model;
     if (cfg.defaults?.summary_style) document.getElementById('cfgSummaryStyle').value = cfg.defaults.summary_style;
   } catch {}
+}
+
+function onLlmProviderChange() {
+  // A model or URL for one provider means nothing to the other.
+  document.getElementById('cfgLlmModel').value = '';
+  document.getElementById('cfgLlmBaseUrl').value = '';
+  updateLlmFields();
 }
 
 function updateLlmFields() {
