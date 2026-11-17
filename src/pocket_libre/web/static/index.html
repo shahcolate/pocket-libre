@@ -238,6 +238,31 @@ tr:hover td { background: var(--bg3); }
       </div>
     </div>
     <div class="card">
+      <h3>Language Model</h3>
+      <div class="form-group">
+        <label>Provider</label>
+        <select id="cfgLlmProvider" onchange="updateLlmFields()">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">Local or OpenAI-compatible (Ollama, LM Studio, llama.cpp, vLLM)</option>
+        </select>
+        <div class="hint">Used for summaries, analyses, chat and speaker labels. A local server keeps everything on your machines.</div>
+      </div>
+      <div class="form-group">
+        <label>Server URL</label>
+        <input type="text" id="cfgLlmBaseUrl" placeholder="http://localhost:11434/v1">
+        <div class="hint" id="llmBaseUrlHint">The server's OpenAI-compatible endpoint. Ollama's is http://localhost:11434/v1.</div>
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="cfgLlmModel" placeholder="claude-haiku-4-5">
+        <div class="hint" id="llmModelHint">Leave empty for Claude Haiku.</div>
+      </div>
+      <div class="form-group" id="llmApiKeyGroup">
+        <label>Server API Key</label>
+        <input type="password" id="cfgLlmApiKey" placeholder="Most local servers need none">
+      </div>
+    </div>
+    <div class="card">
       <h3>Preferences</h3>
       <div class="form-group">
         <label>Output Directory</label>
@@ -814,9 +839,33 @@ async function loadSettings() {
     if (cfg.api?._hf_token_set) hfField.placeholder = cfg.api.hf_token + ' (saved)';
     else hfField.value = cfg.api?.hf_token || '';
 
+    const llmCfg = cfg.llm || {};
+    const localNames = ['openai', 'openai-compatible', 'openai_compatible', 'ollama', 'lmstudio', 'lm-studio', 'llamacpp', 'llama.cpp', 'vllm', 'local'];
+    document.getElementById('cfgLlmProvider').value =
+      localNames.includes((llmCfg.provider || '').toLowerCase()) ? 'openai' : 'anthropic';
+    document.getElementById('cfgLlmBaseUrl').value = llmCfg.base_url || '';
+    document.getElementById('cfgLlmModel').value = llmCfg.model || '';
+    const lkField = document.getElementById('cfgLlmApiKey');
+    if (llmCfg._api_key_set) lkField.placeholder = llmCfg.api_key + ' (saved)';
+    else lkField.value = llmCfg.api_key || '';
+    updateLlmFields();
+
     if (cfg.defaults?.whisper_model) document.getElementById('cfgWhisperModel').value = cfg.defaults.whisper_model;
     if (cfg.defaults?.summary_style) document.getElementById('cfgSummaryStyle').value = cfg.defaults.summary_style;
   } catch {}
+}
+
+function updateLlmFields() {
+  const local = document.getElementById('cfgLlmProvider').value === 'openai';
+  document.getElementById('llmApiKeyGroup').style.display = local ? '' : 'none';
+  document.getElementById('cfgLlmBaseUrl').placeholder = local ? 'http://localhost:11434/v1' : 'Leave empty for api.anthropic.com';
+  document.getElementById('llmBaseUrlHint').textContent = local
+    ? "The server's OpenAI-compatible endpoint. Ollama's is http://localhost:11434/v1."
+    : 'Optional: a proxy or server that speaks the Anthropic Messages API.';
+  document.getElementById('cfgLlmModel').placeholder = local ? 'qwen3:14b' : 'claude-haiku-4-5';
+  document.getElementById('llmModelHint').textContent = local
+    ? 'Required. For Ollama, a name from "ollama list".'
+    : 'Leave empty for Claude Haiku.';
 }
 
 async function saveSettings() {
@@ -825,6 +874,11 @@ async function saveSettings() {
       address: document.getElementById('cfgAddress').value,
     },
     api: {},
+    llm: {
+      provider: document.getElementById('cfgLlmProvider').value,
+      base_url: document.getElementById('cfgLlmBaseUrl').value.trim(),
+      model: document.getElementById('cfgLlmModel').value.trim(),
+    },
     output: {
       directory: document.getElementById('cfgOutputDir').value,
     },
@@ -840,6 +894,8 @@ async function saveSettings() {
   if (ak) config.api.anthropic_key = ak;
   const hf = document.getElementById('cfgHfToken').value;
   if (hf) config.api.hf_token = hf;
+  const lk = document.getElementById('cfgLlmApiKey').value;
+  if (lk) config.llm.api_key = lk;
 
   try {
     const r = await fetch('/api/config', {

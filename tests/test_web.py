@@ -155,3 +155,35 @@ def test_non_secret_values_are_returned_plainly(client, monkeypatch):
 @pytest.mark.parametrize("path", ["/api/device/status", "/api/device/recordings"])
 def test_device_endpoints_require_configuration(client, path):
     assert client.get(path).status_code == 400
+
+
+# ── Language model settings (#39) ───────────────
+
+
+def test_local_model_key_is_masked(client, monkeypatch):
+    monkeypatch.setattr(webapp, "load_config", lambda: {
+        "llm": {"provider": "openai", "model": "qwen3:14b", "api_key": "sk-local-secret"}})
+    body = client.get("/api/config").json()
+    assert body["llm"]["model"] == "qwen3:14b"
+    assert "secret" not in body["llm"]["api_key"]
+    assert body["llm"]["_api_key_set"] is True
+
+
+def test_llm_settings_are_saved(client, monkeypatch):
+    saved = {}
+    monkeypatch.setattr(webapp, "save_config", saved.update)
+    r = client.put("/api/config", json={"llm": {
+        "provider": "openai", "base_url": "http://localhost:11434/v1", "model": "llama3.2",
+        "api_key": "...cret"}})
+    assert r.status_code == 200
+    # A masked value sent back is never saved over the real key.
+    assert saved["llm"] == {"provider": "openai", "base_url": "http://localhost:11434/v1",
+                            "model": "llama3.2"}
+
+
+def test_chat_without_a_model_says_how_to_add_one(client, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("POCKET_LIBRE_LLM_PROVIDER", raising=False)
+    r = client.post("/api/chat/2026-03-28/20260328001919", json={"message": "hi"})
+    assert r.status_code == 400
+    assert "local model" in r.json()["detail"]

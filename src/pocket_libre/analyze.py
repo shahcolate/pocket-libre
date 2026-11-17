@@ -1,7 +1,8 @@
 """AI-powered analysis pipeline for recordings.
 
-Each analysis type runs a single Claude Haiku call (~$0.001) against the
-transcript and produces structured output (JSON or Markdown).
+Each analysis type runs a single call to the configured model (llm.py;
+about $0.001 with Claude Haiku) against the transcript and produces
+structured output (JSON or Markdown).
 
 Usage:
     results = run_analyses(transcript, api_key, ["summary", "entities", "mind_map"])
@@ -13,7 +14,7 @@ import json
 
 from rich.console import Console
 
-from pocket_libre.pricing import DEFAULT_MODEL, format_cost
+from pocket_libre.llm import as_llm, extract_json
 
 console = Console()
 
@@ -96,24 +97,18 @@ Transcript:
 
 def analyze_transcript(
     transcript: str,
-    api_key: str,
+    api_key,
     analysis_type: str,
     custom_prompt: str | None = None,
     custom_name: str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> dict | str:
     """Run a single analysis on a transcript.
 
     Returns parsed JSON dict for structured types, or Markdown string for
     summary/custom types.
     """
-    try:
-        import anthropic
-    except ImportError:
-        console.print("[red]anthropic package not installed. Run: pip install anthropic[/red]")
-        return {} if analysis_type != "custom" else ""
-
-    client = anthropic.Anthropic(api_key=api_key)
+    llm = as_llm(api_key)
 
     if analysis_type == "custom" and custom_prompt:
         prompt = custom_prompt.replace("{transcript}", transcript)
@@ -127,53 +122,36 @@ def analyze_transcript(
     else:
         return {} if analysis_type != "custom" else ""
 
-    message = client.messages.create(
-        model=model,
-        max_tokens=2000,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text = message.content[0].text
-
-    # Log cost
-    console.print(
-        f"[dim]{analysis_type}: "
-        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
-    )
+    reply = llm.complete(prompt, system=system, max_tokens=2000, model=model)
+    text = reply.text
+    console.print(f"[dim]{analysis_type}: {llm.usage(reply)}[/dim]")
 
     if output_format == "json":
-        # Extract JSON from response (Claude may wrap it in markdown code blocks)
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            # Strip markdown code fence
-            lines = cleaned.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            console.print(f"[yellow]Warning: {analysis_type} returned non-JSON, saving as raw text[/yellow]")
-            return {"_raw": text}
+        # Models may wrap the JSON in a code fence or a sentence.
+        value = extract_json(text)
+        if isinstance(value, dict):
+            return value
+        console.print(f"[yellow]Warning: {analysis_type} returned non-JSON, saving as raw text[/yellow]")
+        return {"_raw": text}
 
     return text
 
 
 def run_analyses(
     transcript: str,
-    api_key: str,
+    api_key,
     types: list[str],
     custom_prompts: list[dict] | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> dict[str, dict | str]:
     """Run multiple analyses on a transcript.
 
     Args:
         transcript: Full transcript text
-        api_key: Anthropic API key
+        api_key: The model to use: an llm.LLM, or an Anthropic API key
         types: List of analysis types ("mind_map", "entities", "key_quotes")
         custom_prompts: List of {"name": "...", "prompt": "..."} dicts
-        model: Claude model to use
+        model: Overrides the LLM's model
 
     Returns:
         Dict mapping analysis type name to result (JSON dict or Markdown string)
@@ -252,21 +230,15 @@ def load_analyses(rec_dir, timestamp: str) -> dict[str, dict | str]:
 def chat_with_recording(
     transcript: str,
     question: str,
-    api_key: str,
-    model: str = DEFAULT_MODEL,
+    api_key,
+    model: str | None = None,
 ) -> str:
     """Ask a question about a recording's transcript.
 
     Returns the AI response as a string.
     """
-    try:
-        import anthropic
-    except ImportError:
-        return "Error: anthropic package not installed."
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    message = client.messages.create(
+    llm = as_llm(api_key)
+    reply = llm.complete(
         model=model,
         max_tokens=1000,
         system=(
@@ -274,15 +246,7 @@ def chat_with_recording(
             "cite timestamps [MM:SS] when referencing specific parts. If the answer "
             "isn't in the transcript, say so."
         ),
-        messages=[{
-            "role": "user",
-            "content": f"Transcript:\n{transcript}\n\nQuestion: {question}",
-        }],
+        prompt=f"Transcript:\n{transcript}\n\nQuestion: {question}",
     )
-
-    console.print(
-        f"[dim]Chat: "
-        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
-    )
-
-    return message.content[0].text
+    console.print(f"[dim]Chat: {llm.usage(reply)}[/dim]")
+    return reply.text

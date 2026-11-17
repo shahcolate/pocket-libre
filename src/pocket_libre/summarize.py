@@ -1,14 +1,14 @@
-"""Summarization using Claude Haiku API. ~$0.001 per recording."""
+"""Summarization with the configured model (see llm.py). With Claude Haiku,
+about $0.001 per recording."""
 
 from datetime import datetime
 
 from rich.console import Console
 
+from pocket_libre.llm import as_llm
 from pocket_libre.pricing import (
-    DEFAULT_MODEL,
     INPUT_PRICE_PER_MTOK,
     OUTPUT_PRICE_PER_MTOK,
-    format_cost,
 )
 
 console = Console()
@@ -69,31 +69,24 @@ Transcript:
 
 def summarize_transcript(
     transcript_text: str,
-    api_key: str,
+    api_key,
     style: str = "meeting",
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     custom_prompt: str | None = None,
 ) -> str:
-    """Summarize a transcript using Claude Haiku.
+    """Summarize a transcript.
 
     Args:
         transcript_text: The full transcript with speaker labels.
-        api_key: Anthropic API key.
+        api_key: The model to use: an llm.LLM, or an Anthropic API key.
         style: One of "meeting", "notes", "call", "raw".
-        model: Model to use (default: Haiku for cost efficiency).
+        model: Overrides the LLM's model.
         custom_prompt: Override the built-in prompt entirely.
 
     Returns:
         Markdown-formatted summary.
     """
-    try:
-        import anthropic
-    except ImportError:
-        console.print(
-            "[red]anthropic package not installed.[/red] "
-            "Run: [bold]pip install anthropic[/bold]"
-        )
-        return ""
+    llm = as_llm(api_key)
 
     if custom_prompt:
         prompt = custom_prompt.replace("{transcript}", transcript_text)
@@ -102,26 +95,10 @@ def summarize_transcript(
     else:
         prompt = SUMMARY_PROMPTS["raw"].format(transcript=transcript_text)
 
-    console.print(f"[dim]Summarizing with {model}...[/dim]")
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    message = client.messages.create(
-        model=model,
-        max_tokens=1500,
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-    )
-
-    summary = message.content[0].text
-
-    console.print(
-        f"[dim]Tokens: "
-        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
-    )
-
-    return summary
+    console.print(f"[dim]Summarizing with {model or llm.name}...[/dim]")
+    reply = llm.complete(prompt, max_tokens=1500, model=model)
+    console.print(f"[dim]Tokens: {llm.usage(reply)}[/dim]")
+    return reply.text
 
 
 def estimate_cost(transcript_text: str) -> str:

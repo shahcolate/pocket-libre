@@ -18,12 +18,12 @@ from pocket_libre.config import (
     get_output_dir,
     load_config,
     resolve_address,
-    resolve_anthropic_key,
     resolve_hf_token,
     resolve_session_key,
     save_config,
 )
 from pocket_libre.explorer import explore_device
+from pocket_libre.llm import missing_hint, resolve_llm
 from pocket_libre.probe import probe_characteristic
 from pocket_libre.scanner import scan_devices
 from pocket_libre.sniffer import sniff_all
@@ -147,6 +147,8 @@ def setup(ctx):
     console.print("  [dim]Get one at: https://console.anthropic.com/settings/keys[/dim]")
     console.print("  [dim]Cost: ~$0.003 per recording (summary + entities + mind map)[/dim]")
     console.print("  [dim]Transcription works without this key (runs locally).[/dim]")
+    console.print("  [dim]To use a local model instead (Ollama, LM Studio, any OpenAI-compatible[/dim]")
+    console.print("  [dim]server), leave this empty and set llm.provider=openai and llm.model.[/dim]")
     anthropic_key = _prompt_secret("  Anthropic API key", new_config["api"].get("anthropic_key", ""))
     if anthropic_key:
         new_config["api"]["anthropic_key"] = anthropic_key
@@ -262,7 +264,7 @@ def show_config(ctx, show_path: bool, set_value: str | None):
         console.print(f"\n[bold cyan]{escape(header)}[/bold cyan]")
         for key, val in values.items():
             display = val
-            if key in ("anthropic_key", "hf_token", "session_key") and val and len(str(val)) > 8:
+            if key in ("anthropic_key", "api_key", "hf_token", "session_key") and val and len(str(val)) > 8:
                 display = f"...{str(val)[-4:]}"
             console.print(f"  {key} = {display}")
 
@@ -1107,19 +1109,17 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
     out_root = Path(get_output_dir(config, output_dir))
     whisper_model = whisper_model or get(config, "defaults", "whisper_model", default="base.en")
     style = style or get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config, anthropic_key)
+    llm = resolve_llm(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
     session_key = _require_session_key(session_key, config)
 
-    if not anthropic_key and not skip_process:
+    if not llm and not skip_process:
         console.print(Panel(
-            "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
-            "Transcription works without it (runs locally).\n"
-            "To enable AI summaries (~$0.001/recording):\n"
-            "  pocket-libre setup\n"
-            "  OR set: export ANTHROPIC_API_KEY=sk-ant-...\n\n"
+            "[bold yellow]No model for summaries.[/bold yellow]\n\n"
+            "Transcription works without one (runs locally).\n"
+            + escape(missing_hint(config)) + "\n\n"
             "Use --skip-process to just download.",
-            title="API Key Missing",
+            title="Summaries off",
             border_style="yellow",
         ))
 
@@ -1195,7 +1195,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
                 from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
                 speaker_segments = diarize_auto(
                     segments, audio_path=str(audio_path),
-                    hf_token=hf_token, anthropic_key=anthropic_key,
+                    hf_token=hf_token, anthropic_key=llm,
                 )
                 labeled = merge_transcript_with_speakers(segments, speaker_segments)
             except Exception:
@@ -1208,13 +1208,13 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             console.print(f"  [green]Transcript saved ({len(segments)} segments)[/green]")
 
             # Summarize
-            if anthropic_key:
+            if llm:
                 console.print("  [dim]Summarizing...[/dim]")
                 try:
                     from pocket_libre.summarize import summarize_transcript, summary_stamp
                     summary = summarize_transcript(
                         transcript_text=transcript_text,
-                        api_key=anthropic_key,
+                        api_key=llm,
                         style=style,
                         custom_prompt=prompt,
                     )
@@ -1256,7 +1256,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
     config = ctx.obj["config"]
     whisper_model = whisper_model or get(config, "defaults", "whisper_model", default="base.en")
     style = style or get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config, anthropic_key)
+    llm = resolve_llm(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
 
     input_file = Path(input_path)
@@ -1297,7 +1297,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
 
     speaker_segments = diarize_auto(
         segments, audio_path=str(input_file),
-        hf_token=hf_token, anthropic_key=anthropic_key,
+        hf_token=hf_token, anthropic_key=llm,
     )
     labeled = merge_transcript_with_speakers(segments, speaker_segments)
 
@@ -1313,24 +1313,22 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
         console.print("\n[dim]Skipping summary.[/dim]")
     else:
         console.print("\n[bold cyan]Step 3/3: Summarizing...[/bold cyan]\n")
-        if not anthropic_key:
+        if not llm:
             console.print(Panel(
-                "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
-                "To enable AI summaries:\n"
-                "  1. Get a key at https://console.anthropic.com/settings/keys\n"
-                "  2. Run: [bold]pocket-libre setup[/bold]\n\n"
+                "[bold yellow]No model for summaries.[/bold yellow]\n\n"
+                + escape(missing_hint(config)) + "\n\n"
                 "Transcript was still saved above.",
-                title="API Key Missing",
+                title="Summaries off",
                 border_style="yellow",
             ))
         else:
             from pocket_libre.summarize import estimate_cost, summarize_transcript, summary_stamp
-            est = estimate_cost(transcript_text)
-            console.print(f"[dim]Estimated cost: {est}[/dim]")
+            if llm.provider == "anthropic":
+                console.print(f"[dim]Estimated cost: {estimate_cost(transcript_text)}[/dim]")
 
             summary = summarize_transcript(
                 transcript_text=transcript_text,
-                api_key=anthropic_key,
+                api_key=llm,
                 style=style,
             )
 
@@ -1377,7 +1375,7 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
     out_root = Path(get_output_dir(config, output_dir))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     style = get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config)
+    llm = resolve_llm(config)
     hf_token = resolve_hf_token(config)
 
     console.print(Panel(
@@ -1393,7 +1391,7 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
         return await sync_new_recordings(
             address=address, session_key=session_key, out_root=out_root,
             process=do_process, whisper_model=whisper_model, summary_style=style,
-            anthropic_key=anthropic_key, hf_token=hf_token,
+            anthropic_key=llm, hf_token=hf_token,
         )
 
     try:

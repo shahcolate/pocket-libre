@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from rich.console import Console
 
-from pocket_libre.pricing import DEFAULT_MODEL, format_cost
+from pocket_libre.llm import as_llm, extract_json
 
 console = Console()
 
@@ -65,28 +65,23 @@ def diarize_pyannote(audio_path: str, hf_token: str) -> list[SpeakerSegment]:
     return segments
 
 
-def diarize_llm(whisper_segments: list[dict], api_key: str) -> list[SpeakerSegment]:
-    """Use Claude Haiku to identify speakers from transcript content.
+def diarize_llm(whisper_segments: list[dict], api_key) -> list[SpeakerSegment]:
+    """Use the configured model to identify speakers from transcript content.
 
     Analyzes the text of each segment to determine speaker changes based
-    on context, tone, and conversational flow. ~$0.001 per call.
+    on context, tone, and conversational flow. With Claude Haiku, about
+    $0.001 per call. `api_key` is an llm.LLM or an Anthropic API key.
     """
-    try:
-        import anthropic
-    except ImportError:
-        console.print("[yellow]anthropic not installed, falling back to simple diarization[/yellow]")
-        return diarize_simple(whisper_segments)
+    llm = as_llm(api_key)
 
-    # Build a numbered transcript for Claude to label
+    # Build a numbered transcript for the model to label
     lines = []
     for i, seg in enumerate(whisper_segments):
         t = int(seg["start"])
         lines.append(f"{i}: [{t//60:02d}:{t%60:02d}] {seg['text'].strip()}")
     numbered_transcript = "\n".join(lines)
 
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model=DEFAULT_MODEL,
+    reply = llm.complete(
         max_tokens=1500,
         system=(
             "You identify distinct speakers in transcripts. Analyze speaking patterns, "
@@ -95,33 +90,22 @@ def diarize_llm(whisper_segments: list[dict], api_key: str) -> list[SpeakerSegme
             "Use descriptive labels when possible (e.g. 'Interviewer', 'Host', 'Manager') "
             "or 'Speaker 1', 'Speaker 2' etc. if roles are unclear."
         ),
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Identify the speakers in this transcript. Each line is numbered.\n"
-                f"Return a JSON array like: [{{\"line\": 0, \"speaker\": \"Speaker 1\"}}, ...]\n"
-                f"Only include lines where the speaker CHANGES (first line always included).\n\n"
-                f"{numbered_transcript}"
-            ),
-        }],
+        prompt=(
+            f"Identify the speakers in this transcript. Each line is numbered.\n"
+            f"Return a JSON array like: [{{\"line\": 0, \"speaker\": \"Speaker 1\"}}, ...]\n"
+            f"Only include lines where the speaker CHANGES (first line always included).\n\n"
+            f"{numbered_transcript}"
+        ),
     )
+    console.print(f"[dim]Speaker ID: {llm.usage(reply)}[/dim]")
 
-    console.print(
-        f"[dim]Speaker ID: "
-        f"{format_cost(message.usage.input_tokens, message.usage.output_tokens)}[/dim]"
-    )
-
-    # Parse response
-    import json
-    text = message.content[0].text.strip()
-    if text.startswith("```"):
-        text = "\n".join(ln for ln in text.split("\n") if not ln.strip().startswith("```"))
-
-    try:
-        changes = json.loads(text)
-    except json.JSONDecodeError:
+    # Models may wrap the JSON in a code fence or a sentence, and a small
+    # local one may answer with something else entirely.
+    changes = extract_json(reply.text)
+    if not isinstance(changes, list) or not all(isinstance(c, dict) for c in changes):
         console.print("[yellow]Could not parse speaker labels, falling back to simple[/yellow]")
         return diarize_simple(whisper_segments)
+    changes = [c for c in changes if isinstance(c.get("line", 0), int)]
 
     # Build a line->speaker mapping
     speaker_map = {}
@@ -170,11 +154,12 @@ def diarize_auto(
     whisper_segments: list[dict],
     audio_path: str | None = None,
     hf_token: str | None = None,
-    anthropic_key: str | None = None,
+    anthropic_key=None,
 ) -> list[SpeakerSegment]:
     """Auto-select best diarization method.
 
-    Priority: pyannote (if installed + token) > Claude Haiku (if key) > simple fallback.
+    Priority: pyannote (if installed + token) > the configured model (if any;
+    `anthropic_key` is an llm.LLM or an Anthropic API key) > simple fallback.
     """
     # Try pyannote first
     if hf_token and audio_path:

@@ -20,11 +20,11 @@ from pocket_libre.config import (
     get_output_dir,
     load_config,
     resolve_address,
-    resolve_anthropic_key,
     resolve_hf_token,
     resolve_session_key,
     save_config,
 )
+from pocket_libre.llm import resolve_llm
 from pocket_libre.protocol import MP3_SYNC_WORD
 
 app = FastAPI(title="Pocket Libre")
@@ -76,6 +76,7 @@ async def index():
 class ConfigUpdate(BaseModel):
     device: dict | None = None
     api: dict | None = None
+    llm: dict | None = None
     output: dict | None = None
     defaults: dict | None = None
 
@@ -92,7 +93,7 @@ async def get_config():
         for k, v in values.items():
             # Always mask secrets, however short. The old `len > 8` guard
             # returned short keys verbatim.
-            if k in ("anthropic_key", "hf_token", "session_key") and v:
+            if k in ("anthropic_key", "api_key", "hf_token", "session_key") and v:
                 text = str(v)
                 safe[section][k] = f"...{text[-4:]}" if len(text) > 4 else "..."
                 safe[section][f"_{k}_set"] = True
@@ -104,7 +105,7 @@ async def get_config():
 @app.put("/api/config")
 async def update_config(update: ConfigUpdate):
     config = load_config()
-    for section in ("device", "api", "output", "defaults"):
+    for section in ("device", "api", "llm", "output", "defaults"):
         new_vals = getattr(update, section)
         if new_vals:
             if section not in config:
@@ -309,7 +310,7 @@ async def process_recording(date: str, timestamp: str):
         address = sk = None
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config)
+    llm = resolve_llm(config)
     hf_token = resolve_hf_token(config)
 
     async def event_stream():
@@ -387,7 +388,7 @@ async def process_recording(date: str, timestamp: str):
             from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
 
             speaker_segments = await loop.run_in_executor(
-                None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
+                None, diarize_auto, segments, str(audio_path), hf_token, llm,
             )
             labeled = merge_transcript_with_speakers(segments, speaker_segments)
         except Exception:
@@ -401,15 +402,15 @@ async def process_recording(date: str, timestamp: str):
         yield _sse({"step": "diarize", "message": "Transcript saved"})
 
         # Summarize
-        if anthropic_key:
-            yield _sse({"step": "summarize", "message": "Summarizing with Claude..."})
+        if llm:
+            yield _sse({"step": "summarize", "message": f"Summarizing with {llm.name}..."})
             try:
                 from pocket_libre.summarize import summarize_transcript, summary_stamp
                 summary = await loop.run_in_executor(
                     None,
                     lambda: summarize_transcript(
                         transcript_text=transcript_text,
-                        api_key=anthropic_key,
+                        api_key=llm,
                         style=summary_style,
                     ),
                 )
@@ -440,7 +441,7 @@ async def sync_all():
     out_root = Path(get_output_dir(config))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     summary_style = get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config)
+    llm = resolve_llm(config)
     hf_token = resolve_hf_token(config)
 
     if ble_lock.locked():
@@ -549,7 +550,7 @@ async def sync_all():
             try:
                 from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
                 speaker_segments = await loop.run_in_executor(
-                    None, diarize_auto, segments, str(audio_path), hf_token, anthropic_key,
+                    None, diarize_auto, segments, str(audio_path), hf_token, llm,
                 )
                 labeled = merge_transcript_with_speakers(segments, speaker_segments)
             except Exception:
@@ -561,14 +562,14 @@ async def sync_all():
             transcript_path.write_text(transcript_text, encoding="utf-8")
 
             # Summarize
-            if anthropic_key:
+            if llm:
                 yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Summarizing..."})
                 try:
                     from pocket_libre.summarize import summarize_transcript, summary_stamp
                     summary = await loop.run_in_executor(
                         None,
                         lambda t=transcript_text: summarize_transcript(
-                            transcript_text=t, api_key=anthropic_key, style=summary_style
+                            transcript_text=t, api_key=llm, style=summary_style
                         ),
                     )
                     if summary:
@@ -580,10 +581,10 @@ async def sync_all():
                 except Exception as e:
                     yield _sse({"step": "summarize", "recording": i, "total": total, "message": f"Failed: {e}"})
             else:
-                yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Skipped (no API key)"})
+                yield _sse({"step": "summarize", "recording": i, "total": total, "message": "Skipped (no language model configured)"})
 
             # Run AI analyses (entities, mind map, etc.)
-            if anthropic_key:
+            if llm:
                 enabled_str = get(config, "analysis", "enabled", default="summary,entities")
                 analysis_types = [t.strip() for t in enabled_str.split(",") if t.strip() and t.strip() != "summary"]
                 if analysis_types:
@@ -593,7 +594,7 @@ async def sync_all():
                         results = await loop.run_in_executor(
                             None,
                             lambda t=transcript_text, types=analysis_types: run_analyses(
-                                t, anthropic_key, types
+                                t, llm, types
                             ),
                         )
                         if results:
@@ -681,9 +682,9 @@ class ChatRequest(BaseModel):
 async def chat_recording(date: str, timestamp: str, body: ChatRequest):
     """Ask a question about a recording's transcript."""
     config = load_config()
-    anthropic_key = resolve_anthropic_key(config)
-    if not anthropic_key:
-        raise HTTPException(400, "No Anthropic API key configured. Add one in Settings.")
+    llm = resolve_llm(config)
+    if not llm:
+        raise HTTPException(400, "No language model configured. Add an Anthropic key or a local model in Settings.")
 
     out_root = Path(get_output_dir(config))
     transcript_path = _recording_path(out_root, date, timestamp, "_transcript.txt")
@@ -696,7 +697,7 @@ async def chat_recording(date: str, timestamp: str, body: ChatRequest):
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(
         None,
-        lambda: chat_with_recording(transcript, body.message, anthropic_key),
+        lambda: chat_with_recording(transcript, body.message, llm),
     )
     return {"response": response}
 
@@ -718,9 +719,9 @@ async def get_analyses(date: str, timestamp: str):
 async def run_analysis(date: str, timestamp: str):
     """Run AI analyses on an already-transcribed recording."""
     config = load_config()
-    anthropic_key = resolve_anthropic_key(config)
-    if not anthropic_key:
-        raise HTTPException(400, "No Anthropic API key configured.")
+    llm = resolve_llm(config)
+    if not llm:
+        raise HTTPException(400, "No language model configured. Add an Anthropic key or a local model in Settings.")
 
     out_root = Path(get_output_dir(config))
     transcript_path = _recording_path(out_root, date, timestamp, "_transcript.txt")
@@ -740,7 +741,7 @@ async def run_analysis(date: str, timestamp: str):
     loop = asyncio.get_event_loop()
     results = await loop.run_in_executor(
         None,
-        lambda: run_analyses(transcript, anthropic_key, analysis_types),
+        lambda: run_analyses(transcript, llm, analysis_types),
     )
 
     if results:
