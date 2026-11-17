@@ -77,7 +77,16 @@ def _prompt_secret(label: str, existing: str) -> str | None:
 def cli(ctx):
     """Pocket Libre: Liberate your Pocket AI recorder from the cloud."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config()
+    ctx.obj["config_error"] = None
+    try:
+        ctx.obj["config"] = load_config()
+    except (OSError, ValueError) as e:  # tomllib's decode error is a ValueError
+        if ctx.invoked_subcommand != "doctor":
+            raise click.ClickException(
+                f"{CONFIG_FILE} doesn't parse: {e}. Fix it by hand, or move it aside "
+                "and run: pocket-libre setup") from e
+        ctx.obj["config"] = {}
+        ctx.obj["config_error"] = str(e)
 
 
 # ── Setup & Config ──────────────────────────────
@@ -739,6 +748,52 @@ def download(ctx, address: str | None, session_key: str | None,
         console.print(f"[bold green]Saved {len(data):,} bytes to {out_path}[/bold green]")
 
     asyncio.run(_run())
+
+
+@cli.command()
+@click.option("--no-scan", is_flag=True, help="Skip the Bluetooth scan for the device.")
+@click.option("--connect", is_flag=True,
+              help="Also connect and authenticate, as every device command does.")
+@click.pass_context
+def doctor(ctx, no_scan: bool, connect: bool):
+    """Check the setup and say what to fix.
+
+    \b
+    Config, device settings, the recordings folder (and recordings that
+    need `repair`), Whisper and ffmpeg, the language model (a local server
+    is asked for its models), speaker labels, and Bluetooth: the adapter,
+    and a scan for your Pocket. Exits 1 if anything would stop a command.
+    """
+    from pocket_libre.doctor import FAIL, INFO, OK, WARN, run_checks
+
+    with console.status("Checking..."):
+        checks = run_checks(ctx.obj["config"], ctx.obj.get("config_error"),
+                            scan=not no_scan, connect=connect)
+
+    from rich.table import Table
+
+    marks = {OK: "[green]✓[/green]", INFO: "[dim]·[/dim]", WARN: "[yellow]![/yellow]",
+             FAIL: "[red]✗[/red]"}
+    table = Table.grid(padding=(0, 1))
+    table.add_column(no_wrap=True)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column()
+    for c in checks:
+        text = escape(c.message)
+        if c.fix and c.status != OK:
+            text += "".join(f"\n[cyan]→ {escape(line.strip())}[/cyan]"
+                            for line in c.fix.splitlines())
+        table.add_row(marks[c.status], c.area, text)
+    console.print(table)
+
+    fails = sum(c.status == FAIL for c in checks)
+    warns = sum(c.status == WARN for c in checks)
+    if fails or warns:
+        console.print(f"\n{fails} problem(s), {warns} warning(s).")
+    else:
+        console.print("\n[green]All good.[/green]")
+    if fails:
+        raise SystemExit(1)
 
 
 @cli.command("search")

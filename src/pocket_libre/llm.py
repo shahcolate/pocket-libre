@@ -128,7 +128,7 @@ class LLM:
         except urllib.error.URLError as e:
             raise LLMError(f"Can't reach {url}: {e.reason}. Is the server running?") from e
         except (TimeoutError, OSError) as e:
-            raise LLMError(f"{url}: {e or type(e).__name__}") from e
+            raise LLMError(f"{url}: {str(e) or type(e).__name__}") from e
         except ValueError as e:
             raise LLMError(f"{url} did not answer with JSON.") from e
         try:
