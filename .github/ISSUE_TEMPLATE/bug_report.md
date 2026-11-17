@@ -17,6 +17,11 @@ labels: bug
 - OS:
 - Device model and firmware: <!-- pocket-libre status -->
 
+**`pocket-libre doctor --connect` output**
+
+<!-- It checks Bluetooth, config, Whisper, ffmpeg and the language model,
+     and never prints keys. Paste it here. -->
+
 **Anything else**
 
 <!-- Please scrub your session key and API keys from any pasted output.

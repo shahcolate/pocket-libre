@@ -28,6 +28,12 @@ DEFAULTS = {
         "whisper_model": "base.en",
         "summary_style": "meeting",
     },
+    "llm": {
+        "provider": "anthropic",
+        "base_url": "",
+        "model": "",
+        "api_key": "",
+    },
     "analysis": {
         "enabled": "summary,entities",
         "custom_prompts": "",

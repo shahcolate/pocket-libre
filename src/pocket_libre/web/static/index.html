@@ -123,6 +123,7 @@ tr:hover td { background: var(--bg3); }
 
 .entity-section { margin: 0.5rem 0; }
 .entity-section h5 { font-size: 0.8rem; color: var(--dim); margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px; }
+mark { background: var(--yellow); color: var(--bg); border-radius: 2px; padding: 0 1px; }
 </style>
 </head>
 <body>
@@ -194,7 +195,7 @@ tr:hover td { background: var(--bg3); }
     <div class="card">
       <h3>Processed Recordings</h3>
       <div style="margin-bottom:1rem">
-        <input type="text" id="librarySearch" placeholder="Search recordings..." oninput="filterLibrary()" style="width:100%;padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:0.9rem;">
+        <input type="text" id="librarySearch" placeholder="Search recordings and what was said..." oninput="filterLibrary()" style="width:100%;padding:0.5rem 0.75rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-size:0.9rem;">
       </div>
       <div id="localRecordings">
         <div class="empty">No recordings yet. Download and process recordings from the Device tab.</div>
@@ -235,6 +236,31 @@ tr:hover td { background: var(--bg3); }
         <label>HuggingFace Token</label>
         <input type="password" id="cfgHfToken" placeholder="hf_...">
         <div class="hint">Optional. Enables speaker identification. Get one at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co</a></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Language Model</h3>
+      <div class="form-group">
+        <label>Provider</label>
+        <select id="cfgLlmProvider" onchange="onLlmProviderChange()">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="openai">Local or OpenAI-compatible (Ollama, LM Studio, llama.cpp, vLLM)</option>
+        </select>
+        <div class="hint">Used for summaries, analyses, chat and speaker labels. A local server keeps everything on your machines.</div>
+      </div>
+      <div class="form-group">
+        <label>Server URL</label>
+        <input type="text" id="cfgLlmBaseUrl" placeholder="http://localhost:11434/v1">
+        <div class="hint" id="llmBaseUrlHint">The server's OpenAI-compatible endpoint. Ollama's is http://localhost:11434/v1.</div>
+      </div>
+      <div class="form-group">
+        <label>Model</label>
+        <input type="text" id="cfgLlmModel" placeholder="claude-haiku-4-5">
+        <div class="hint" id="llmModelHint">Leave empty for Claude Haiku.</div>
+      </div>
+      <div class="form-group" id="llmApiKeyGroup">
+        <label>Server API Key</label>
+        <input type="password" id="cfgLlmApiKey" placeholder="Most local servers need none">
       </div>
     </div>
     <div class="card">
@@ -725,14 +751,79 @@ async function runAnalysis(date, ts, btn) {
   }
 }
 
+let searchTimer = null;
+let searchSeq = 0;
+
 function filterLibrary() {
-  const query = document.getElementById('librarySearch').value.toLowerCase();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runLibrarySearch, 250);
+}
+
+async function runLibrarySearch() {
+  const raw = document.getElementById('librarySearch').value.trim();
+  const query = raw.toLowerCase();
+  const seq = ++searchSeq;
+  document.querySelectorAll('.search-hits').forEach(el => el.remove());
+
+  // Matches inside transcripts, grouped by recording.
+  let byRec = {};
+  if (raw.length >= 2) {
+    try {
+      const r = await fetch('/api/search?' + new URLSearchParams({ q: raw, limit: 300 }));
+      if (seq !== searchSeq) return;      // a newer search has started
+      if (r.ok) {
+        for (const h of (await r.json()).hits) {
+          (byRec[`${h.date}/${h.timestamp}`] ||= []).push(h);
+        }
+      }
+    } catch {}
+  }
+
   document.querySelectorAll('.library-card').forEach(card => {
     const date = card.dataset.date || '';
     const ts = card.dataset.ts || '';
-    const text = card.textContent.toLowerCase();
-    card.style.display = (text.includes(query) || date.includes(query) || ts.includes(query)) ? '' : 'none';
+    const hits = byRec[`${date}/${ts}`] || [];
+    const nameMatch = !query || card.textContent.toLowerCase().includes(query)
+      || date.includes(query) || ts.includes(query);
+    card.style.display = (nameMatch || hits.length) ? '' : 'none';
+    if (hits.length) {
+      const box = document.createElement('div');
+      box.className = 'search-hits';
+      box.style.cssText = 'margin-top:0.5rem;font-size:0.85rem';
+      box.innerHTML = hits.slice(0, 5).map(h => `
+        <div class="search-hit" style="padding:0.2rem 0;cursor:pointer" title="Play from here"
+             onclick="event.stopPropagation(); playFrom('${date}', '${ts}', ${h.offset_s ?? 0})">
+          <span style="color:var(--cyan)">${h.clock ? '[' + h.clock + ']' : ''}</span>
+          ${h.speaker ? '<strong>' + escapeHtml(h.speaker) + ':</strong>' : ''}
+          ${highlightSpans(h.text, h.spans)}
+        </div>`).join('')
+        + (hits.length > 5 ? `<div style="color:var(--dim)">and ${hits.length - 5} more</div>` : '');
+      card.insertBefore(box, card.querySelector('.recording-detail'));
+    }
   });
+}
+
+function highlightSpans(text, spans) {
+  // Spans count code points, as Python does.
+  const chars = Array.from(text);
+  let out = '', pos = 0;
+  for (const [start, end] of spans) {
+    out += escapeHtml(chars.slice(pos, start).join(''));
+    out += '<mark>' + escapeHtml(chars.slice(start, end).join('')) + '</mark>';
+    pos = end;
+  }
+  return out + escapeHtml(chars.slice(pos).join(''));
+}
+
+async function playFrom(date, ts, offset) {
+  const card = document.querySelector(`.library-card[data-date="${date}"][data-ts="${ts}"]`);
+  const detail = document.getElementById(`detail-${date}-${ts}`);
+  if (!card || !detail) return;
+  if (!detail.classList.contains('open')) await toggleDetail(card, date, ts);
+  const audio = detail.querySelector('audio');
+  if (!audio) return;
+  const seek = () => { audio.currentTime = offset; audio.play().catch(() => {}); };
+  if (audio.readyState >= 1) seek(); else audio.addEventListener('loadedmetadata', seek, { once: true });
 }
 
 function escapeHtml(s) {
@@ -814,9 +905,40 @@ async function loadSettings() {
     if (cfg.api?._hf_token_set) hfField.placeholder = cfg.api.hf_token + ' (saved)';
     else hfField.value = cfg.api?.hf_token || '';
 
+    const llmCfg = cfg.llm || {};
+    const localNames = ['openai', 'openai-compatible', 'openai_compatible', 'ollama', 'lmstudio', 'lm-studio', 'llamacpp', 'llama.cpp', 'vllm', 'local'];
+    document.getElementById('cfgLlmProvider').value =
+      localNames.includes((llmCfg.provider || '').toLowerCase()) ? 'openai' : 'anthropic';
+    document.getElementById('cfgLlmBaseUrl').value = llmCfg.base_url || '';
+    document.getElementById('cfgLlmModel').value = llmCfg.model || '';
+    const lkField = document.getElementById('cfgLlmApiKey');
+    if (llmCfg._api_key_set) lkField.placeholder = llmCfg.api_key + ' (saved)';
+    else lkField.value = llmCfg.api_key || '';
+    updateLlmFields();
+
     if (cfg.defaults?.whisper_model) document.getElementById('cfgWhisperModel').value = cfg.defaults.whisper_model;
     if (cfg.defaults?.summary_style) document.getElementById('cfgSummaryStyle').value = cfg.defaults.summary_style;
   } catch {}
+}
+
+function onLlmProviderChange() {
+  // A model or URL for one provider means nothing to the other.
+  document.getElementById('cfgLlmModel').value = '';
+  document.getElementById('cfgLlmBaseUrl').value = '';
+  updateLlmFields();
+}
+
+function updateLlmFields() {
+  const local = document.getElementById('cfgLlmProvider').value === 'openai';
+  document.getElementById('llmApiKeyGroup').style.display = local ? '' : 'none';
+  document.getElementById('cfgLlmBaseUrl').placeholder = local ? 'http://localhost:11434/v1' : 'Leave empty for api.anthropic.com';
+  document.getElementById('llmBaseUrlHint').textContent = local
+    ? "The server's OpenAI-compatible endpoint. Ollama's is http://localhost:11434/v1."
+    : 'Optional: a proxy or server that speaks the Anthropic Messages API.';
+  document.getElementById('cfgLlmModel').placeholder = local ? 'qwen3:14b' : 'claude-haiku-4-5';
+  document.getElementById('llmModelHint').textContent = local
+    ? 'Required. For Ollama, a name from "ollama list".'
+    : 'Leave empty for Claude Haiku.';
 }
 
 async function saveSettings() {
@@ -825,6 +947,11 @@ async function saveSettings() {
       address: document.getElementById('cfgAddress').value,
     },
     api: {},
+    llm: {
+      provider: document.getElementById('cfgLlmProvider').value,
+      base_url: document.getElementById('cfgLlmBaseUrl').value.trim(),
+      model: document.getElementById('cfgLlmModel').value.trim(),
+    },
     output: {
       directory: document.getElementById('cfgOutputDir').value,
     },
@@ -840,6 +967,8 @@ async function saveSettings() {
   if (ak) config.api.anthropic_key = ak;
   const hf = document.getElementById('cfgHfToken').value;
   if (hf) config.api.hf_token = hf;
+  const lk = document.getElementById('cfgLlmApiKey').value;
+  if (lk) config.llm.api_key = lk;
 
   try {
     const r = await fetch('/api/config', {

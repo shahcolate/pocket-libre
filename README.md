@@ -9,7 +9,7 @@
 Pocket Libre replaces the vendor app for your [Pocket](https://heypocket.com) AI
 voice recorder. It pulls recordings off the device over Bluetooth, transcribes
 them locally with Whisper, works out who was speaking, and summarizes with your
-own API key.
+own API key, or with a model running on your own machine.
 
 Your conversations never touch anyone else's servers.
 
@@ -187,11 +187,29 @@ pocket-libre sync                   # Download + transcribe + summarize everythi
 pocket-libre watch                  # Same, but automatically whenever the device appears
 pocket-libre process --input x.mp3  # Process an audio file you already have
 pocket-libre delete --downloaded    # Free up space: remove what's safely downloaded
+pocket-libre search budget review   # Find what was said, across every transcript
+pocket-libre doctor                 # Check the setup and say what to fix
 ```
 
 Leave `watch` running and recordings sync themselves whenever the Pocket comes
 in range. It backs off to five-minute checks while the device is away, so it
 isn't scanning flat out all day.
+
+### Searching transcripts
+
+`pocket-libre search` finds the transcript lines that contain every word of
+the query, newest recording first, with the time into the recording and the
+speaker:
+
+```bash
+pocket-libre search next quarter budget
+pocket-libre search --speaker Host -C 2 deadline     # two lines of context
+pocket-libre search --since 2026-10-01 --regex "due (by|on)"
+pocket-libre search --json invoice | jq .            # for scripts
+```
+
+In the web interface, the Library search box does the same. Click a match to
+play the recording from that moment.
 
 ### Freeing up space on the device
 
@@ -225,6 +243,8 @@ once they finish. To delete one recording, use
 | `delete` | Delete recordings from the device: one, or every one already downloaded (`--downloaded`) |
 | `sync` | Download, transcribe, and summarize what's new |
 | `process` | Process an existing audio file |
+| `search` | Search every saved transcript |
+| `doctor` | Check Bluetooth, config, Whisper, ffmpeg and the language model, and say what to fix |
 | `repair` | Remove the duplicated fragments from BLE downloads made on firmware 1.8.9 before the fix ([#42](https://github.com/shahcolate/pocket-libre/issues/42)) |
 | `transcribe` | Transcribe locally with Whisper |
 | `convert` | Convert raw audio to WAV |
@@ -252,6 +272,12 @@ hf_token = "hf_..."
 [output]
 directory = "~/Pocket Libre"
 
+[llm]                      # optional; Anthropic's Claude Haiku by default
+provider = "anthropic"     # or "openai" for Ollama and other local servers
+model = ""
+base_url = ""
+api_key = ""
+
 [defaults]
 whisper_model = "base.en"
 summary_style = "meeting"
@@ -271,13 +297,43 @@ so `ANTHROPIC_API_KEY` in your shell overrides the file.
 | **Anthropic** | Summaries, entity extraction, mind maps, chat | ~$0.02/recording | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
 | **HuggingFace** | Speaker identification via pyannote | Free | [huggingface.co](https://huggingface.co/settings/tokens) |
 
-Both are optional. Without an Anthropic key you still get local transcription.
-Without a HuggingFace token, speaker labeling falls back to Claude, and then to
-a single unnamed speaker.
+Both are optional. Without an Anthropic key you still get local transcription,
+and a [local model](#local-models) can do everything the key does. Without a
+HuggingFace token, speaker labeling falls back to the language model, and then
+to a single unnamed speaker.
 
 That cost estimate assumes Claude Haiku 4.5 at $1 and $5 per million input and
 output tokens, on a half-hour recording with summary, entities, and mind map all
 enabled. Every command prints what it actually spent.
+
+### Local models
+
+Summaries, entities, mind maps, chat and speaker labels can run on a model on
+your own machine (or your LAN), so nothing leaves it at all. Any server with an
+OpenAI-compatible API works: [Ollama](https://ollama.com), LM Studio,
+llama.cpp, vLLM, or LiteLLM. With Ollama:
+
+```bash
+ollama pull qwen3:14b
+pocket-libre config --set llm.provider=openai
+pocket-libre config --set llm.model=qwen3:14b
+pocket-libre doctor          # checks the server is up and has the model
+```
+
+`llm.base_url` defaults to Ollama's `http://localhost:11434/v1`; set it for
+any other server, and `llm.api_key` if it needs one. The same settings are in
+the web interface under Settings. With a local provider, an Anthropic key is
+never used, even if one is set.
+
+Smaller models follow the JSON formats for entities, mind maps and speaker
+labels less reliably. Pocket Libre looks for the JSON inside a chatty answer
+and falls back when there isn't any, but a 7B model will miss more often than
+a 14B one. Very long recordings can also exceed a small model's context window.
+
+For Anthropic, `llm.model` replaces Haiku and `llm.base_url` points the
+Messages API at a proxy. The environment variables `POCKET_LIBRE_LLM_PROVIDER`,
+`POCKET_LIBRE_LLM_MODEL`, `POCKET_LIBRE_LLM_BASE_URL` and `OPENAI_API_KEY`
+override the file.
 
 ## Protocol
 
@@ -392,9 +448,10 @@ lever: `pocket-libre config --set defaults.whisper_model=base.en` is much
 lighter than `large`. Diarization needs PyTorch and a HuggingFace token; without them the
 pipeline falls back to a heuristic speaker split.
 
-**Something else.** Open an issue with the output of `pocket-libre status` and
-your firmware version — and scrub your session key, which is also your
-device's WiFi password.
+**Something else.** Run `pocket-libre doctor --connect` first: it checks most
+of the above and says what to fix. If that doesn't sort it out, open an issue
+with its output. It never prints your session key, which is also your device's
+WiFi password, but scrub it from anything else you paste.
 
 ## Status
 
@@ -414,6 +471,9 @@ device's WiFi password.
 - [x] `wifi-transfer` over WiFi, with automatic join on Linux and Windows
 - [x] Deleting recordings from the device, only when a verified copy is on disk
 - [x] USB mass storage mode on and off (`usb`)
+- [x] Local language models (Ollama and any OpenAI-compatible server)
+- [x] Searching every transcript (`search`, and the web Library)
+- [x] Setup checks (`doctor`)
 - [ ] Copying recordings over USB once the device is in mass storage mode
 - [ ] Several files over one WiFi connection
 - [ ] WiFi transfer on other firmware

@@ -18,12 +18,12 @@ from pocket_libre.config import (
     get_output_dir,
     load_config,
     resolve_address,
-    resolve_anthropic_key,
     resolve_hf_token,
     resolve_session_key,
     save_config,
 )
 from pocket_libre.explorer import explore_device
+from pocket_libre.llm import missing_hint, resolve_llm
 from pocket_libre.probe import probe_characteristic
 from pocket_libre.scanner import scan_devices
 from pocket_libre.sniffer import sniff_all
@@ -77,7 +77,16 @@ def _prompt_secret(label: str, existing: str) -> str | None:
 def cli(ctx):
     """Pocket Libre: Liberate your Pocket AI recorder from the cloud."""
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config()
+    ctx.obj["config_error"] = None
+    try:
+        ctx.obj["config"] = load_config()
+    except (OSError, ValueError) as e:  # tomllib's decode error is a ValueError
+        if ctx.invoked_subcommand != "doctor":
+            raise click.ClickException(
+                f"{CONFIG_FILE} doesn't parse: {e}. Fix it by hand, or move it aside "
+                "and run: pocket-libre setup") from e
+        ctx.obj["config"] = {}
+        ctx.obj["config_error"] = str(e)
 
 
 # ── Setup & Config ──────────────────────────────
@@ -147,6 +156,8 @@ def setup(ctx):
     console.print("  [dim]Get one at: https://console.anthropic.com/settings/keys[/dim]")
     console.print("  [dim]Cost: ~$0.003 per recording (summary + entities + mind map)[/dim]")
     console.print("  [dim]Transcription works without this key (runs locally).[/dim]")
+    console.print("  [dim]To use a local model instead (Ollama, LM Studio, any OpenAI-compatible[/dim]")
+    console.print("  [dim]server), leave this empty and set llm.provider=openai and llm.model.[/dim]")
     anthropic_key = _prompt_secret("  Anthropic API key", new_config["api"].get("anthropic_key", ""))
     if anthropic_key:
         new_config["api"]["anthropic_key"] = anthropic_key
@@ -262,7 +273,7 @@ def show_config(ctx, show_path: bool, set_value: str | None):
         console.print(f"\n[bold cyan]{escape(header)}[/bold cyan]")
         for key, val in values.items():
             display = val
-            if key in ("anthropic_key", "hf_token", "session_key") and val and len(str(val)) > 8:
+            if key in ("anthropic_key", "api_key", "hf_token", "session_key") and val and len(str(val)) > 8:
                 display = f"...{str(val)[-4:]}"
             console.print(f"  {key} = {display}")
 
@@ -740,6 +751,141 @@ def download(ctx, address: str | None, session_key: str | None,
 
 
 @cli.command()
+@click.option("--no-scan", is_flag=True, help="Skip the Bluetooth scan for the device.")
+@click.option("--connect", is_flag=True,
+              help="Also connect and authenticate, as every device command does.")
+@click.pass_context
+def doctor(ctx, no_scan: bool, connect: bool):
+    """Check the setup and say what to fix.
+
+    \b
+    Config, device settings, the recordings folder (and recordings that
+    need `repair`), Whisper and ffmpeg, the language model (a local server
+    is asked for its models), speaker labels, and Bluetooth: the adapter,
+    and a scan for your Pocket. Exits 1 if anything would stop a command.
+    """
+    from pocket_libre.doctor import FAIL, INFO, OK, WARN, run_checks
+
+    with console.status("Checking..."):
+        checks = run_checks(ctx.obj["config"], ctx.obj.get("config_error"),
+                            scan=not no_scan, connect=connect)
+
+    from rich.table import Table
+
+    marks = {OK: "[green]✓[/green]", INFO: "[dim]·[/dim]", WARN: "[yellow]![/yellow]",
+             FAIL: "[red]✗[/red]"}
+    table = Table.grid(padding=(0, 1))
+    table.add_column(no_wrap=True)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column()
+    for c in checks:
+        text = escape(c.message)
+        if c.fix and c.status != OK:
+            text += "".join(f"\n[cyan]→ {escape(line.strip())}[/cyan]"
+                            for line in c.fix.splitlines())
+        table.add_row(marks[c.status], c.area, text)
+    console.print(table)
+
+    fails = sum(c.status == FAIL for c in checks)
+    warns = sum(c.status == WARN for c in checks)
+    if fails or warns:
+        console.print(f"\n{fails} problem(s), {warns} warning(s).")
+    else:
+        console.print("\n[green]All good.[/green]")
+    if fails:
+        raise SystemExit(1)
+
+
+@cli.command("search")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--speaker", default=None, help="Only lines from a speaker whose label contains this.")
+@click.option("--since", default=None, help="Only recordings from this date on (YYYY-MM-DD).")
+@click.option("-C", "--context", default=0, type=click.IntRange(0, 20),
+              help="Lines of transcript to show around each match.")
+@click.option("--regex", is_flag=True, help="Treat the query as a regular expression.")
+@click.option("--limit", default=50, type=click.IntRange(0), show_default=True,
+              help="Most matches to show; 0 for all.")
+@click.option("--json", "as_json", is_flag=True, help="Print matches as JSON.")
+@click.option("--output-dir", default=None, help="Where recordings are saved (default: from config).")
+@click.pass_context
+def search_transcripts(ctx, query: tuple[str, ...], speaker: str | None, since: str | None,
+                       context: int, regex: bool, limit: int, as_json: bool,
+                       output_dir: str | None):
+    """Search every saved transcript.
+
+    \b
+    A line matches when it has every word of the query, in any order:
+      pocket-libre search budget review
+      pocket-libre search --speaker Host -C 2 "next quarter"
+      pocket-libre search --regex "deadline|due (date|by)"
+    Exits 1 when nothing matches.
+    """
+    import json as _json
+
+    from rich.text import Text
+
+    from pocket_libre.search import search
+
+    root = Path(get_output_dir(ctx.obj["config"], output_dir))
+    try:
+        hits = search(root, " ".join(query), regex=regex, speaker=speaker, since=since,
+                      context=context, limit=limit + 1 if limit else None)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+    more = bool(limit) and len(hits) > limit
+    hits = hits[:limit] if limit else hits
+
+    if as_json:
+        click.echo(_json.dumps([{
+            "date": h.date, "name": h.name,
+            "recorded_at": h.recorded_at.isoformat() if h.recorded_at else None,
+            "offset_s": h.line.offset_s, "clock": h.line.clock,
+            "speaker": h.line.speaker, "text": h.line.text,
+            "line": h.line.number, "transcript": str(h.path),
+        } for h in hits], indent=1, ensure_ascii=False))
+        if not hits:
+            raise SystemExit(1)
+        return
+
+    if not hits:
+        console.print(f"No matches in the transcripts under {escape(str(root))}.")
+        raise SystemExit(1)
+
+    def show(line, spans=(), style="dim"):
+        text = Text("  ")
+        if line.clock:
+            text.append(f"[{line.clock}] ", style="cyan" if spans else style)
+        if line.speaker:
+            text.append(f"{line.speaker}: ", style="bold" if spans else style)
+        body = Text(line.text, style="" if spans else style)
+        for start, end in spans:
+            body.stylize("bold yellow", start, end)
+        text.append_text(body)
+        console.print(text)
+
+    current = None
+    recordings = 0
+    for h in hits:
+        if (h.date, h.name) != current:
+            current = (h.date, h.name)
+            recordings += 1
+            when = f" ({h.recorded_at:%H:%M} UTC)" if h.recorded_at else ""
+            console.print(f"\n[bold]{escape(h.date)} · {escape(h.name)}[/bold][dim]{when}[/dim]")
+        elif context:
+            console.print("  [dim]…[/dim]")
+        for line in h.before:
+            show(line)
+        show(h.line, h.spans)
+        for line in h.after:
+            show(line)
+
+    summary = f"\n{len(hits)} match{'es' if len(hits) != 1 else ''} in {recordings} recording(s)"
+    if more:
+        summary += f"; showing the newest {limit} (--limit 0 for all)"
+    console.print(f"[dim]{summary}[/dim]")
+
+
+@cli.command()
 @click.argument("paths", nargs=-1, required=True,
                 type=click.Path(exists=True, path_type=Path))
 @click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
@@ -1107,19 +1253,17 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
     out_root = Path(get_output_dir(config, output_dir))
     whisper_model = whisper_model or get(config, "defaults", "whisper_model", default="base.en")
     style = style or get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config, anthropic_key)
+    llm = resolve_llm(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
     session_key = _require_session_key(session_key, config)
 
-    if not anthropic_key and not skip_process:
+    if not llm and not skip_process:
         console.print(Panel(
-            "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
-            "Transcription works without it (runs locally).\n"
-            "To enable AI summaries (~$0.001/recording):\n"
-            "  pocket-libre setup\n"
-            "  OR set: export ANTHROPIC_API_KEY=sk-ant-...\n\n"
+            "[bold yellow]No model for summaries.[/bold yellow]\n\n"
+            "Transcription works without one (runs locally).\n"
+            + escape(missing_hint(config)) + "\n\n"
             "Use --skip-process to just download.",
-            title="API Key Missing",
+            title="Summaries off",
             border_style="yellow",
         ))
 
@@ -1195,7 +1339,7 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
                 from pocket_libre.diarize import diarize_auto, merge_transcript_with_speakers
                 speaker_segments = diarize_auto(
                     segments, audio_path=str(audio_path),
-                    hf_token=hf_token, anthropic_key=anthropic_key,
+                    hf_token=hf_token, anthropic_key=llm,
                 )
                 labeled = merge_transcript_with_speakers(segments, speaker_segments)
             except Exception:
@@ -1208,13 +1352,13 @@ def sync(ctx, address: str | None, output_dir: str | None, since: str | None,
             console.print(f"  [green]Transcript saved ({len(segments)} segments)[/green]")
 
             # Summarize
-            if anthropic_key:
+            if llm:
                 console.print("  [dim]Summarizing...[/dim]")
                 try:
                     from pocket_libre.summarize import summarize_transcript, summary_stamp
                     summary = summarize_transcript(
                         transcript_text=transcript_text,
-                        api_key=anthropic_key,
+                        api_key=llm,
                         style=style,
                         custom_prompt=prompt,
                     )
@@ -1256,7 +1400,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
     config = ctx.obj["config"]
     whisper_model = whisper_model or get(config, "defaults", "whisper_model", default="base.en")
     style = style or get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config, anthropic_key)
+    llm = resolve_llm(config, anthropic_key)
     hf_token = resolve_hf_token(config, hf_token)
 
     input_file = Path(input_path)
@@ -1297,7 +1441,7 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
 
     speaker_segments = diarize_auto(
         segments, audio_path=str(input_file),
-        hf_token=hf_token, anthropic_key=anthropic_key,
+        hf_token=hf_token, anthropic_key=llm,
     )
     labeled = merge_transcript_with_speakers(segments, speaker_segments)
 
@@ -1313,24 +1457,22 @@ def process(ctx, input_path: str, whisper_model: str | None, style: str | None,
         console.print("\n[dim]Skipping summary.[/dim]")
     else:
         console.print("\n[bold cyan]Step 3/3: Summarizing...[/bold cyan]\n")
-        if not anthropic_key:
+        if not llm:
             console.print(Panel(
-                "[bold yellow]No Anthropic API key found.[/bold yellow]\n\n"
-                "To enable AI summaries:\n"
-                "  1. Get a key at https://console.anthropic.com/settings/keys\n"
-                "  2. Run: [bold]pocket-libre setup[/bold]\n\n"
+                "[bold yellow]No model for summaries.[/bold yellow]\n\n"
+                + escape(missing_hint(config)) + "\n\n"
                 "Transcript was still saved above.",
-                title="API Key Missing",
+                title="Summaries off",
                 border_style="yellow",
             ))
         else:
             from pocket_libre.summarize import estimate_cost, summarize_transcript, summary_stamp
-            est = estimate_cost(transcript_text)
-            console.print(f"[dim]Estimated cost: {est}[/dim]")
+            if llm.provider == "anthropic":
+                console.print(f"[dim]Estimated cost: {estimate_cost(transcript_text)}[/dim]")
 
             summary = summarize_transcript(
                 transcript_text=transcript_text,
-                api_key=anthropic_key,
+                api_key=llm,
                 style=style,
             )
 
@@ -1377,7 +1519,7 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
     out_root = Path(get_output_dir(config, output_dir))
     whisper_model = get(config, "defaults", "whisper_model", default="base.en")
     style = get(config, "defaults", "summary_style", default="meeting")
-    anthropic_key = resolve_anthropic_key(config)
+    llm = resolve_llm(config)
     hf_token = resolve_hf_token(config)
 
     console.print(Panel(
@@ -1393,7 +1535,7 @@ def watch(ctx, address: str | None, session_key: str | None, interval: float,
         return await sync_new_recordings(
             address=address, session_key=session_key, out_root=out_root,
             process=do_process, whisper_model=whisper_model, summary_style=style,
-            anthropic_key=anthropic_key, hf_token=hf_token,
+            anthropic_key=llm, hf_token=hf_token,
         )
 
     try:

@@ -109,7 +109,7 @@ async def sync_new_recordings(
     process: bool = False,
     whisper_model: str = "base.en",
     summary_style: str = "meeting",
-    anthropic_key: str | None = None,
+    anthropic_key=None,  # an llm.LLM (or an Anthropic API key); None: no summaries
     hf_token: str | None = None,
 ) -> int:
     """Download every recording not already on disk. Returns the count."""
@@ -164,7 +164,7 @@ def _process_recording(
     rec_dir: Path,
     whisper_model: str,
     summary_style: str,
-    anthropic_key: str | None,
+    anthropic_key,  # an llm.LLM, an Anthropic API key, or None
     hf_token: str | None,
 ) -> None:
     """Transcribe, diarize, and summarize one downloaded recording."""

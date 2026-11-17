@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Summaries, entities, mind maps, chat and speaker labels can run on a local
+  model. Set `llm.provider = "openai"` and `llm.model` to use Ollama (the
+  default `llm.base_url`), LM Studio, llama.cpp, vLLM, LiteLLM or any other
+  OpenAI-compatible server; the web Settings page has the same fields. With a
+  local provider no Anthropic key is ever used. For Anthropic, `llm.model` and
+  `llm.base_url` replace Haiku and point at a proxy. JSON is found inside
+  chatty answers, and reasoning models' `<think>` blocks are dropped
+  ([#39](https://github.com/shahcolate/pocket-libre/issues/39)).
+- `search` finds what was said across every saved transcript, with the time
+  into the recording and the speaker (`--speaker`, `--since`, `--context`,
+  `--regex`, `--json`). The web Library's search box searches transcripts too,
+  and a click plays the recording from that moment.
+- `doctor` checks the setup in one pass: config, device settings, the
+  recordings folder (including recordings that need `repair`), Whisper and
+  ffmpeg, the language model (a local server is asked whether it has the
+  model), speaker labels, and Bluetooth, with a scan for the Pocket.
+  `--connect` also authenticates. Each problem comes with the fix.
 - `repair` removes the duplicated fragments from recordings downloaded over
   BLE on firmware 1.8.9 before this fix. It follows the MP3 frame chain and
   only cuts where the chain breaks and 192 bytes repeat the 192 before them.
@@ -16,6 +33,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A config file that doesn't parse no longer ends every command in a
+  traceback; the error names the file and how to recover.
 - BLE downloads on firmware 1.8.9 no longer glitch about once a second. The
   device sends the last notification of every 4 KB block twice, and the
   duplicate ended up in the MP3. It is now dropped, and the size check counts
