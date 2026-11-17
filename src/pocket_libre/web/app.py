@@ -644,6 +644,29 @@ async def local_recordings():
     return recordings
 
 
+@app.get("/api/search")
+async def search_transcripts(q: str, speaker: str | None = None, since: str | None = None,
+                             regex: bool = False, limit: int = 200):
+    """Lines of saved transcripts that match `q` (see search.py), newest first."""
+    from pocket_libre.search import search
+
+    root = Path(get_output_dir(load_config()))
+    limit = max(1, min(limit, 1000))
+    try:
+        hits = search(root, q, regex=regex, speaker=speaker, since=since, limit=limit + 1)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "truncated": len(hits) > limit,
+        "hits": [{
+            "date": h.date, "timestamp": h.name,
+            "recorded_at": h.recorded_at.isoformat() if h.recorded_at else None,
+            "offset_s": h.line.offset_s, "clock": h.line.clock,
+            "speaker": h.line.speaker, "text": h.line.text, "spans": h.spans,
+        } for h in hits[:limit]],
+    }
+
+
 @app.get("/api/local/{date}/{timestamp}/transcript")
 async def get_transcript(date: str, timestamp: str):
     config = load_config()

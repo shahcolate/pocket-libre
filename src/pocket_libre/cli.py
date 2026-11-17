@@ -741,6 +741,95 @@ def download(ctx, address: str | None, session_key: str | None,
     asyncio.run(_run())
 
 
+@cli.command("search")
+@click.argument("query", nargs=-1, required=True)
+@click.option("--speaker", default=None, help="Only lines from a speaker whose label contains this.")
+@click.option("--since", default=None, help="Only recordings from this date on (YYYY-MM-DD).")
+@click.option("-C", "--context", default=0, type=click.IntRange(0, 20),
+              help="Lines of transcript to show around each match.")
+@click.option("--regex", is_flag=True, help="Treat the query as a regular expression.")
+@click.option("--limit", default=50, type=click.IntRange(0), show_default=True,
+              help="Most matches to show; 0 for all.")
+@click.option("--json", "as_json", is_flag=True, help="Print matches as JSON.")
+@click.option("--output-dir", default=None, help="Where recordings are saved (default: from config).")
+@click.pass_context
+def search_transcripts(ctx, query: tuple[str, ...], speaker: str | None, since: str | None,
+                       context: int, regex: bool, limit: int, as_json: bool,
+                       output_dir: str | None):
+    """Search every saved transcript.
+
+    \b
+    A line matches when it has every word of the query, in any order:
+      pocket-libre search budget review
+      pocket-libre search --speaker Host -C 2 "next quarter"
+      pocket-libre search --regex "deadline|due (date|by)"
+    Exits 1 when nothing matches.
+    """
+    import json as _json
+
+    from rich.text import Text
+
+    from pocket_libre.search import search
+
+    root = Path(get_output_dir(ctx.obj["config"], output_dir))
+    try:
+        hits = search(root, " ".join(query), regex=regex, speaker=speaker, since=since,
+                      context=context, limit=limit + 1 if limit else None)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+    more = bool(limit) and len(hits) > limit
+    hits = hits[:limit] if limit else hits
+
+    if as_json:
+        click.echo(_json.dumps([{
+            "date": h.date, "name": h.name,
+            "recorded_at": h.recorded_at.isoformat() if h.recorded_at else None,
+            "offset_s": h.line.offset_s, "clock": h.line.clock,
+            "speaker": h.line.speaker, "text": h.line.text,
+            "line": h.line.number, "transcript": str(h.path),
+        } for h in hits], indent=1, ensure_ascii=False))
+        if not hits:
+            raise SystemExit(1)
+        return
+
+    if not hits:
+        console.print(f"No matches in the transcripts under {escape(str(root))}.")
+        raise SystemExit(1)
+
+    def show(line, spans=(), style="dim"):
+        text = Text("  ")
+        if line.clock:
+            text.append(f"[{line.clock}] ", style="cyan" if spans else style)
+        if line.speaker:
+            text.append(f"{line.speaker}: ", style="bold" if spans else style)
+        body = Text(line.text, style="" if spans else style)
+        for start, end in spans:
+            body.stylize("bold yellow", start, end)
+        text.append_text(body)
+        console.print(text)
+
+    current = None
+    recordings = 0
+    for h in hits:
+        if (h.date, h.name) != current:
+            current = (h.date, h.name)
+            recordings += 1
+            when = f" ({h.recorded_at:%H:%M} UTC)" if h.recorded_at else ""
+            console.print(f"\n[bold]{escape(h.date)} · {escape(h.name)}[/bold][dim]{when}[/dim]")
+        elif context:
+            console.print("  [dim]…[/dim]")
+        for line in h.before:
+            show(line)
+        show(h.line, h.spans)
+        for line in h.after:
+            show(line)
+
+    summary = f"\n{len(hits)} match{'es' if len(hits) != 1 else ''} in {recordings} recording(s)"
+    if more:
+        summary += f"; showing the newest {limit} (--limit 0 for all)"
+    console.print(f"[dim]{summary}[/dim]")
+
+
 @cli.command()
 @click.argument("paths", nargs=-1, required=True,
                 type=click.Path(exists=True, path_type=Path))
