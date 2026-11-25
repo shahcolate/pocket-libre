@@ -470,8 +470,6 @@ async def sync_all():
         raise HTTPException(409, "Device is busy.")
 
     async def event_stream():
-        from pocket_libre.protocol import MP3_SYNC_WORD
-
         # Single BLE connection for listing + all downloads
         downloaded = []  # list of (rec, audio_path, data) tuples
         async with ble_lock:
