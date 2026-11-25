@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from pocket_libre.commands import (
     PocketCommander,
     Recording,
-    needs_download as recording_needs_download,
+    needs_download,
     save_recording,
 )
 from pocket_libre.config import (
@@ -328,7 +328,7 @@ async def process_recording(date: str, timestamp: str):
     audio_path = _recording_path(out_root, date, timestamp, ".mp3")
     # Device access is only needed when the audio isn't on disk yet;
     # reprocessing a downloaded file must work without a session key.
-    download_needed = recording_needs_download(audio_path)
+    download_needed = needs_download(audio_path)
     if download_needed:
         address, sk = _require_device(config)
     else:
@@ -492,7 +492,7 @@ async def sync_all():
                     new_recs = []
                     for rec in all_recs:
                         mp3_path = out_root / rec.date / f"{rec.timestamp}.mp3"
-                        if recording_needs_download(mp3_path):
+                        if needs_download(mp3_path):
                             new_recs.append(rec)
 
                     if not new_recs:
