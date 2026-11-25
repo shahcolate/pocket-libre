@@ -14,7 +14,12 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel
 
-from pocket_libre.commands import PocketCommander, Recording
+from pocket_libre.commands import (
+    PocketCommander,
+    Recording,
+    needs_download as recording_needs_download,
+    save_recording,
+)
 from pocket_libre.config import (
     get,
     get_output_dir,
@@ -31,6 +36,30 @@ app = FastAPI(title="Pocket Libre")
 
 STATIC_DIR = Path(__file__).parent / "static"
 ble_lock = asyncio.Lock()
+
+
+async def _find_recording(cmd, date: str, timestamp: str) -> Recording:
+    recordings = await cmd.list_all_recordings()
+    return next(
+        (rec for rec in recordings if rec.date == date and rec.timestamp == timestamp),
+        Recording(date=date, timestamp=timestamp, duration_s=0),
+    )
+
+
+def _save_web_download(cmd, recording: Recording, path: Path, data: bytes) -> bytes:
+    expected_size = cmd.last_expected_size
+    verified = (
+        not cmd._disconnected
+        and expected_size > 0
+        and len(data) == expected_size
+    )
+
+    mp3_start = data.find(MP3_SYNC_WORD)
+    if mp3_start > 0:
+        data = data[mp3_start:]
+
+    save_recording(path, data, verified, recording)
+    return data
 
 
 # ── Path safety ─────────────────────────────────
@@ -249,7 +278,7 @@ async def download_recording(date: str, timestamp: str):
                         yield _sse({"step": "error", "message": "Authentication failed."})
                         return
 
-                    rec = Recording(date=date, timestamp=timestamp, duration_s=0)
+                    rec = await _find_recording(cmd, date, timestamp)
                     yield _sse({"step": "download", "message": f"Downloading {date}/{timestamp}...", "progress": 0})
 
                     queue = asyncio.Queue()
@@ -275,12 +304,8 @@ async def download_recording(date: str, timestamp: str):
                         yield _sse({"step": "error", "message": "No data received."})
                         return
 
-                    mp3_start = data.find(MP3_SYNC_WORD)
-                    if mp3_start > 0:
-                        data = data[mp3_start:]
-
                     out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_bytes(data)
+                    data = _save_web_download(cmd, rec, out_path, data)
 
                     yield _sse({
                         "step": "complete",
@@ -303,8 +328,8 @@ async def process_recording(date: str, timestamp: str):
     audio_path = _recording_path(out_root, date, timestamp, ".mp3")
     # Device access is only needed when the audio isn't on disk yet;
     # reprocessing a downloaded file must work without a session key.
-    needs_download = not audio_path.exists()
-    if needs_download:
+    download_needed = recording_needs_download(audio_path)
+    if download_needed:
         address, sk = _require_device(config)
     else:
         address = sk = None
@@ -318,7 +343,7 @@ async def process_recording(date: str, timestamp: str):
         rec_dir.mkdir(parents=True, exist_ok=True)
 
         # Download if not already on disk
-        if needs_download:
+        if download_needed:
             if ble_lock.locked():
                 yield _sse({"step": "error", "message": "Device is busy."})
                 return
@@ -331,7 +356,7 @@ async def process_recording(date: str, timestamp: str):
                             yield _sse({"step": "error", "message": "Auth failed."})
                             return
 
-                        rec = Recording(date=date, timestamp=timestamp, duration_s=0)
+                        rec = await _find_recording(cmd, date, timestamp)
                         yield _sse({"step": "download", "message": "Downloading...", "progress": 0})
 
                         queue = asyncio.Queue()
@@ -352,10 +377,7 @@ async def process_recording(date: str, timestamp: str):
                             yield _sse({"step": "error", "message": "No data received."})
                             return
 
-                        mp3_start = data.find(MP3_SYNC_WORD)
-                        if mp3_start > 0:
-                            data = data[mp3_start:]
-                        audio_path.write_bytes(data)
+                        data = _save_web_download(cmd, rec, audio_path, data)
                         yield _sse({"step": "download", "progress": 100, "message": f"Downloaded {len(data):,} bytes"})
 
                 except Exception as e:
@@ -470,7 +492,7 @@ async def sync_all():
                     new_recs = []
                     for rec in all_recs:
                         mp3_path = out_root / rec.date / f"{rec.timestamp}.mp3"
-                        if not mp3_path.exists():
+                        if recording_needs_download(mp3_path):
                             new_recs.append(rec)
 
                     if not new_recs:
@@ -497,12 +519,7 @@ async def sync_all():
                                 yield _sse({"step": "error", "message": f"Empty download for {rec.timestamp}"})
                                 continue
 
-                            # Trim to MP3 sync word
-                            mp3_start = data.find(MP3_SYNC_WORD)
-                            if mp3_start > 0:
-                                data = data[mp3_start:]
-
-                            audio_path.write_bytes(data)
+                            data = _save_web_download(cmd, rec, audio_path, data)
                             downloaded.append((rec, audio_path))
                             yield _sse({"step": "download", "recording": i, "total": len(new_recs), "progress": 100,
                                         "message": f"Downloaded {len(data):,} bytes"})

@@ -157,6 +157,73 @@ def test_device_endpoints_require_configuration(client, path):
     assert client.get(path).status_code == 400
 
 
+def test_sync_records_verified_download_and_retries_unverified_copy(
+    client, out_root, monkeypatch
+):
+    import json
+    import sys
+    import types
+
+    from pocket_libre.commands import (
+        DOWNLOADS_FILE,
+        Recording,
+        has_complete_copy,
+        save_recording,
+    )
+    from pocket_libre.protocol import MP3_SYNC_WORD
+
+    rec = Recording("2026-03-29", "20260329001919", 4)
+    path = out_root / rec.date / rec.filename
+    path.parent.mkdir(parents=True)
+    save_recording(path, b"partial", False, rec)
+
+    payload = MP3_SYNC_WORD + b"\x00" * 10
+
+    class FakeCommander:
+        def __init__(self, address):
+            self._disconnected = False
+            self.last_expected_size = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def authenticate(self, key):
+            return True
+
+        async def list_all_recordings(self):
+            return [rec]
+
+        async def download_ble(self, recording, progress_callback=None):
+            self.last_expected_size = len(payload)
+            return payload
+
+    monkeypatch.setattr(webapp, "PocketCommander", FakeCommander)
+    monkeypatch.setattr(webapp, "_require_device", lambda config: ("address", "key"))
+    monkeypatch.setattr(webapp, "resolve_llm", lambda config: None)
+    monkeypatch.setattr(webapp, "resolve_hf_token", lambda config: None)
+
+    def fail_load_model(model):
+        raise RuntimeError("skip transcription in this test")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "whisper",
+        types.SimpleNamespace(load_model=fail_load_model),
+    )
+
+    response = client.get("/api/sync-all")
+
+    assert response.status_code == 200
+    assert "Synced 1 recording(s)" in response.text
+    assert has_complete_copy(path, rec)
+    assert json.loads((path.parent / DOWNLOADS_FILE).read_text()) == {
+        path.name: {"size": path.stat().st_size, "duration_s": rec.duration_s}
+    }
+
+
 # ── Language model settings (#39) ───────────────
 
 
