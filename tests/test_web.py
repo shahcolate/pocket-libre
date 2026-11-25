@@ -157,6 +157,74 @@ def test_device_endpoints_require_configuration(client, path):
     assert client.get(path).status_code == 400
 
 
+@pytest.mark.parametrize(
+    ("disconnected", "expected", "received"),
+    [
+        (True, 12, 12),
+        (False, 0, 12),
+        (False, 12, 11),
+    ],
+)
+def test_web_download_marks_failed_transfer_unverified(
+    tmp_path, disconnected, expected, received
+):
+    from pocket_libre.commands import Recording, needs_download
+
+    rec = Recording("2026-03-29", "20260329001919", 4)
+    path = tmp_path / rec.filename
+    data = b"\xff\xfb" + b"\x00" * 10
+
+    class FakeCommander:
+        _disconnected = disconnected
+        last_expected_size = expected
+        last_received_size = received
+
+    from pocket_libre.web.app import _save_web_download
+
+    _save_web_download(FakeCommander(), rec, path, data)
+
+    assert needs_download(path)
+    assert not path.with_name(path.name + ".part").exists()
+
+
+def test_web_download_records_exact_raw_transfer(tmp_path):
+    from pocket_libre.commands import Recording, has_complete_copy
+    from pocket_libre.protocol import MP3_SYNC_WORD
+    from pocket_libre.web.app import _save_web_download
+
+    rec = Recording("2026-03-29", "20260329001919", 4)
+    path = tmp_path / rec.filename
+    data = MP3_SYNC_WORD + b"\x00" * 10
+
+    class FakeCommander:
+        _disconnected = False
+        last_expected_size = len(data) + 3
+        last_received_size = len(data) + 3
+
+    saved = _save_web_download(FakeCommander(), rec, path, data)
+
+    assert saved == data
+    assert has_complete_copy(path, rec)
+
+
+@pytest.mark.asyncio
+async def test_find_recording_lists_only_requested_date():
+    from pocket_libre.commands import Recording
+    from pocket_libre.web.app import _find_recording
+
+    rec = Recording("2026-03-29", "20260329001919", 4)
+
+    class FakeCommander:
+        async def list_files(self, date):
+            assert date == rec.date
+            return [rec]
+
+        async def list_all_recordings(self):
+            raise AssertionError("full listing should not be used")
+
+    assert await _find_recording(FakeCommander(), rec.date, rec.timestamp) == rec
+
+
 def test_sync_records_verified_download_and_retries_unverified_copy(
     client, out_root, monkeypatch
 ):
@@ -183,6 +251,7 @@ def test_sync_records_verified_download_and_retries_unverified_copy(
         def __init__(self, address):
             self._disconnected = False
             self.last_expected_size = 0
+            self.last_received_size = 0
 
         async def __aenter__(self):
             return self
@@ -193,11 +262,15 @@ def test_sync_records_verified_download_and_retries_unverified_copy(
         async def authenticate(self, key):
             return True
 
+        async def list_files(self, date):
+            return [rec]
+
         async def list_all_recordings(self):
             return [rec]
 
         async def download_ble(self, recording, progress_callback=None):
             self.last_expected_size = len(payload)
+            self.last_received_size = len(payload)
             return payload
 
     monkeypatch.setattr(webapp, "PocketCommander", FakeCommander)

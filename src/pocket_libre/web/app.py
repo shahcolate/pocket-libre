@@ -39,7 +39,7 @@ ble_lock = asyncio.Lock()
 
 
 async def _find_recording(cmd, date: str, timestamp: str) -> Recording:
-    recordings = await cmd.list_all_recordings()
+    recordings = await cmd.list_files(date)
     return next(
         (rec for rec in recordings if rec.date == date and rec.timestamp == timestamp),
         Recording(date=date, timestamp=timestamp, duration_s=0),
@@ -48,10 +48,11 @@ async def _find_recording(cmd, date: str, timestamp: str) -> Recording:
 
 def _save_web_download(cmd, recording: Recording, path: Path, data: bytes) -> bytes:
     expected_size = cmd.last_expected_size
+    received_size = getattr(cmd, "last_received_size", len(data))
     verified = (
         not cmd._disconnected
         and expected_size > 0
-        and len(data) == expected_size
+        and received_size == expected_size
     )
 
     mp3_start = data.find(MP3_SYNC_WORD)
